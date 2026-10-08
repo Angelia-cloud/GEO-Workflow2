@@ -536,7 +536,7 @@ ENGINES = {
 
 @app.get("/api/setups/{setup_id}/export.csv")
 def export_approved_prompts_csv(setup_id: str, db: Session = Depends(get_db)):
-    """Download of every approved prompt, one row per engine and prompt."""
+    """Download of every saved prompt (generated, edited or approved), one row per engine and prompt."""
     import csv
     import io
     import re as _re
@@ -548,7 +548,7 @@ def export_approved_prompts_csv(setup_id: str, db: Session = Depends(get_db)):
     intents = {i.item_id: i for i in s.intents}
     engine_order = list(ENGINES.keys())
     deleted = {i.item_id for i in s.intents if i.status == "Deleted"}
-    rows = [p for p in s.prompts if p.status == "Approved" and p.item_id not in deleted]
+    rows = [p for p in s.prompts if p.status in ("Approved", "Generated", "Edited") and p.item_id not in deleted]
     rows.sort(key=lambda p: (engine_order.index(p.engine_id) if p.engine_id in engine_order else 99, p.item_id))
 
     buf = io.StringIO()
@@ -563,7 +563,7 @@ def export_approved_prompts_csv(setup_id: str, db: Session = Depends(get_db)):
     return Response(
         content="\ufeff" + buf.getvalue(),  # BOM so Excel shows curly quotes correctly
         media_type="text/csv; charset=utf-8",
-        headers={"Content-Disposition": f'attachment; filename="Approved_Prompts_{safe}.csv"'},
+        headers={"Content-Disposition": f'attachment; filename="Prompts_{safe}.csv"'},
     )
 
 

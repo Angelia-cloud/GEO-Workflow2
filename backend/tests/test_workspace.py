@@ -180,3 +180,26 @@ def test_report_assistant(monkeypatch):
                                                             "topic_ids": ["summary"], "coverage": 90})
     out = assistant.answer("What is detection?", context, stub)
     assert out["supported"] and out["confidence"] == 90 and out["sources"] == [{"id": "glance", "label": "At a glance"}]
+
+
+def test_team_review_prepare_and_diagnose(new_client, monkeypatch):
+    monkeypatch.delenv("GROQ_API_KEY", raising=False)
+    monkeypatch.setenv("GEO_LLM_PROVIDER", "groq")
+    pid = new_client["id"]
+    empty = client.post(f"/api/review/{pid}/prepare").json()
+    assert empty["ready"] is False
+    raw = SAMPLE_EXPORT.read_bytes()
+    assert client.post(f"/api/clients/{pid}/rankscale/imports", files={"file": ("export.csv", raw)}).status_code == 200
+    assert client.get(f"/api/clients/{pid}").json()["hasMeasurements"] is True
+    prepared = client.post(f"/api/review/{pid}/prepare")
+    assert prepared.status_code == 200, prepared.text
+    assert prepared.json()["ready"] is True
+    insights = client.get(f"/api/insights/{pid}").json()
+    assert insights, "insights should be generated from the loaded measurements"
+    assert all("intent_name" in i for i in insights)
+    again = client.post(f"/api/review/{pid}/prepare").json()
+    assert again["insights"] == prepared.json()["insights"]  # idempotent: does not duplicate insights
+    diagnoses = client.post(f"/api/review/{pid}/diagnoses", json={"insight_ids": [i["id"] for i in insights[:2]]})
+    assert diagnoses.status_code == 200, diagnoses.text
+    for d in diagnoses.json():
+        assert {"id", "title", "summary"} <= set(d)

@@ -291,8 +291,9 @@ def load_measurements(client_id: str, raw: bytes, file_name: str, imported_by: s
             result = {"measurements_loaded": False,
                       "reason": (report.errors[0]["message"] if report.errors else "No rows to load")}
         else:
-            mapped = [{"mapped_property_id": str(client_id), "mapped_prompt_id": None, "mapped_engine_id": None,
-                       "mapped_competitor_ids": None} for _ in rows]
+            # Every row belongs to the client the file was uploaded for, whatever its brand_reference says.
+            mapped = [{"property_id": str(client_id), "prompt_id": None, "engine_id": None, "competitor_ids": {}}
+                      for _ in rows]
             with connect() as conn:
                 with conn.transaction():
                     conn.execute("select pg_advisory_xact_lock(%s)", (loader.LOCK_KEY,))

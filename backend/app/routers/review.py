@@ -206,3 +206,29 @@ def agent_versions():
 def activity(limit: int = 50):
     return fetch_all("""select entity_table, entity_id, action, actor, occurred_at
                         from activity_history order by id desc limit %s""", (limit,))
+
+
+
+# ---------------------------------------------------------------------------
+# Team review as the React app runs it
+# ---------------------------------------------------------------------------
+class DiagnoseInsights(BaseModel):
+    insight_ids: list[str]
+    per_insight: int = 2
+
+
+@router.post("/api/review/{property_id}/prepare")
+def prepare_review(property_id: str):
+    """Run the auto-alert check and generate insights for the latest period when none exist yet."""
+    from ..services.review_flow import prepare_review as prepare
+    try:
+        return prepare(property_id)
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+
+
+@router.post("/api/review/{property_id}/diagnoses")
+def diagnose_insights(property_id: str, body: DiagnoseInsights):
+    """Diagnose the answers behind the approved insights and return the diagnoses to review."""
+    from ..services.review_flow import diagnose_insights as diagnose
+    return diagnose(property_id, body.insight_ids, max(1, min(body.per_insight, 5)))

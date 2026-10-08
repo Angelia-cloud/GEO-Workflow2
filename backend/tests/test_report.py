@@ -25,8 +25,8 @@ def test_report_sections_and_formula():
         expected = conn.execute("""
             select round(avg(case when brand_found then 100.0/(1+0.1*(own_brand_rank-1)) else 0 end), 2) v
             from v_measurements_flat
-            where (measured_at at time zone 'Australia/Sydney')::date between %s and %s""",
-            (d["period"]["from"], d["period"]["to"])).fetchone()["v"]
+            where property_id = %s and (measured_at at time zone 'Australia/Sydney')::date between %s and %s""",
+            (pid, d["period"]["from"], d["period"]["to"])).fetchone()["v"]
     assert abs(vis - float(expected)) < 0.01
     assert d["competitors"][0]["is_self"]
 

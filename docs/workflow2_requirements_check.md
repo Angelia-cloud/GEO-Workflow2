@@ -49,5 +49,5 @@ Legend: ✅ met before · 🔧 was missing or broken, now built · ⚠️ partly
   Rankscale export and confirm the Aug numbers match the deck (40.47 / 42.34 / #2.03 / 88.8 full set; 27.93 neutral).
 - **Baseline figures** are back-calculated from the deck's % movements (`is_derived`). Replace them with the originals if you have them.
 - **Targets**: none set yet — add them in Settings (label "Target").
-- **Workflow 1 routes** (`/api/onboarding/*`) are also missing from `app/main.py`; the onboarding tests fail for that reason. Not touched here.
+- **Workflow 1 onboarding** (`/api/onboarding/*`): the old onboarding module and its tests were removed; Phase 1 now runs through `/api/prompt-setup/*` (`backend/agents/prompt_setup`).
 - **Alert thresholds** (15% / 3 points / 7-day window) are a starting point — agree them with Truc.

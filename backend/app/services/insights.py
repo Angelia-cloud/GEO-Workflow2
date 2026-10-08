@@ -350,6 +350,7 @@ def _list_insights(
              order by i.intent_id, i.engine_id, i.insight_type, i.period_end desc, i.created_at desc
            )
            select i.*,
+                  (select it.name from intents it where it.id = i.intent_id) as intent_name,
                   coalesce(a.answers, 0) as measurement_count,
                   a.detection as measured_detection,
                   a.visibility_score as measured_visibility

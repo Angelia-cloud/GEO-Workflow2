@@ -80,7 +80,11 @@ def load_rows_in_transaction(conn, rows: list[dict], rep: IngestReport,
                 values.extend([mapping.get("property_id"), mapping.get("prompt_id"),
                                mapping.get("engine_id"), Jsonb(mapping.get("competitor_ids", {}))])
             cp.write_row(values)
-    if mapped_rows is not None:
+    # Fully mapped rows (reviewed imports) can be recognised as already loaded and skipped. Rows mapped
+    # only to a property (Rankscale uploads from the app) always go through the SQL loader, which is
+    # idempotent on (prompt, engine, measured_at).
+    fully_mapped = mapped_rows is not None and all(m.get("prompt_id") and m.get("engine_id") for m in mapped_rows)
+    if fully_mapped:
         complete = conn.execute("""
                         with incoming as (
                             select distinct mapped_prompt_id as prompt_id, mapped_engine_id as engine_id,

@@ -67,6 +67,7 @@ In the Supabase SQL Editor (or `psql`), run in order:
 | `db/09_workflow2.sql` | Auto alerts, insight review, learning memory, agent versions, outcomes |
 | `db/10_import_performance.sql` | Measurement batch index |
 | `db/11_workspace.sql` | **New.** Client fields (client name, team, target audience, goals), team members, library entries/files, Rankscale import history; seeds the four clients and Vy Huynh |
+| `db/12_data_provenance.sql` | Flags synthetic import batches and excludes them from `v_measurements_flat` (rows are kept). See `docs/data_reconciliation_sept_2026.md` |
 
 `db/03_load_rankscale.sql` is run by the app on every upload. `04_coogee_example.sql` and `05_verify.sql` are optional checks.
 
@@ -109,7 +110,7 @@ Frontend development with hot reload: keep uvicorn on port 8000 and run `npm run
 | Phase 1 · transcript → intents | Kickoff transcript (upload, paste or sample), **Generate intents** | `POST /api/prompt-setup/runs`, `/runs/{id}/intents` — `agents/prompt_setup` (AI) or rules |
 | Phase 1 · prompts | Prompts per engine, regenerate one, QA scores | `/runs/{id}/prompts`, `/prompts/regenerate` — Prompt Writer + Prompt QA |
 | Phase 1 · Google Sheets | Save & export, CSV download | `/runs/{id}/sheet`, `/complete`, `/export.csv` — writes approved intents/prompts to the DB |
-| Phase 2 · upload | Import Rankscale file (overlapping exports are de-duplicated) | `POST /api/clients/{id}/rankscale/imports` → history + measurements + auto alerts |
+| Phase 2 · upload | Import Rankscale file (overlapping exports are de-duplicated); measurements and auto alerts continue after the saved-history response | `POST /api/clients/{id}/rankscale/imports` → history + background measurement load + auto alerts |
 | Report | Coogee: prepared September 2026 report. Other clients / periods: report built from the saved records. **Export HTML** | `GET /api/clients/{id}/rankscale`, library entries |
 | Ask this report | Chat panel on every report | `POST /api/report-assistant/ask` (AI); keyword matcher when no LLM |
 | Team review → findings | **Team review** button on the report (shown once a client has measurements) | `POST /api/review/{id}/prepare` (alerts + insights), `GET /api/insights/{id}`, `POST /api/feedback` |

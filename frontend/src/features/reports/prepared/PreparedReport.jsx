@@ -1,4 +1,4 @@
-import { createElement, useCallback, useEffect, useRef, useState } from "react";
+import { createElement, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ReportReader } from "../assistant/ReportChat";
 import { buildPreparedContext } from "../assistant/reportContext";
 import { SEPTEMBER_2026 } from "../periods";
@@ -17,6 +17,10 @@ const PREPARED_CONTEXT = buildPreparedContext(),
     ["appendix", "Appendix"],
   ];
 function PreparedReport({ onPeriodApply, client, onTeamReview }) {
+  const chatContext = useMemo(
+    () => ({ ...PREPARED_CONTEXT, key: `verified:${client?.id}`, propertyId: client?.id, periodLabel: "Verified Supabase measurements", topics: [] }),
+    [client?.id],
+  );
   const e = useRef(null),
     t = useRef(null),
     i = useRef([]),
@@ -138,7 +142,7 @@ function PreparedReport({ onPeriodApply, client, onTeamReview }) {
           </a>
         ))}
       </nav>
-      <ReportReader context={PREPARED_CONTEXT} onSource={s}>
+      <ReportReader context={chatContext} onSource={s}>
         <iframe
           ref={e}
           className="coogee-report-frame"

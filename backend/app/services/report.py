@@ -226,7 +226,8 @@ def build_report(pid: str, date_from: date | None = None, date_to: date | None =
         neutral_cur = one(cur_w, "and is_neutral")
         neutral_prompts = conn.execute("""select count(*) filter (where p.is_neutral) as neutral, count(*) as total
                                           from prompts p join intents i on i.id = p.intent_id
-                                          where i.property_id = %s and p.status = 'tracked'""", (pid,)).fetchone()
+                                          where i.property_id = %s and p.status = 'tracked'
+                                            and exists (select 1 from v_measurements_flat f where f.prompt_id = p.id)""", (pid,)).fetchone()
         comp_rows = competitor_metrics(conn, pid, date_from, date_to)
         competitors = [{"name": prop["name"], "short": "Coogee", "is_self": True, **neutral_cur}] + \
                       [{**_num(r), "name": r["display_name"] or r["name"], "short": r["name"], "is_self": False}

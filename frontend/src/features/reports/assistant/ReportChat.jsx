@@ -24,28 +24,45 @@ function safeAnswer(A, e) {
   }
 }
 /**
- * Ask the report assistant agent (POST /api/report-assistant/ask). When no LLM is configured, the call
- * fails or the agent cannot ground an answer, the keyword matcher over the same report topics answers.
+ * Ask the report assistant (POST /api/report-assistant/{property}/ask). Only the question and the report dates
+ * are sent: the server builds the facts from verified Supabase measurements. Without an LLM the server returns
+ * that same server-built context and the keyword matcher answers from it. The browser never supplies facts.
  */
 async function askReport(context, question) {
-  if (!context?.ready || !context.topics?.length) return safeAnswer(context, question);
+  if (!context?.propertyId) return safeAnswer(context, question);
   try {
-    const reply = await apiFetch("/api/report-assistant/ask", {
+    const reply = await apiFetch(`/api/report-assistant/${encodeURIComponent(context.propertyId)}/ask`, {
       method: "POST",
-      ...jsonBody({
-        question,
-        context: { client: { name: context.client?.name }, periodLabel: context.periodLabel, topics: context.topics },
-      }),
+      ...jsonBody({ question, date_from: context.period?.from, date_to: context.period?.to }),
     });
-    if (!reply || reply.fallback || !reply.supported) return safeAnswer(context, question);
+    if (reply?.fallback && reply.context) return safeAnswer(reply.context, question);
     return reply;
   } catch {
-    return safeAnswer(context, question);
+    return {
+      text: "The report assistant is unavailable right now, so I cannot answer from verified data. Please try again shortly.",
+      confidence: null,
+      confidenceReason: "The server could not build or answer from verified report data.",
+      sources: [],
+      supported: false,
+    };
   }
 }
 const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 function initialMessages(A) {
   const e = A.suggestions?.[0] || "Summarise this report";
+  if (A.propertyId) {
+    return [
+      {
+        id: 0,
+        role: "answer",
+        text: "Ask about visibility, search intents, competitors, findings or recommendations. Answers come from verified RankScale measurements held in Supabase, state the reporting period and metric definition, and say so when something is not available.",
+        confidence: null,
+        confidenceReason: "Welcome message. Answers are generated from server-side verified data.",
+        sources: [],
+        supported: false,
+      },
+    ];
+  }
   return [
     {
       id: 0,
@@ -208,7 +225,7 @@ function ReportChat({ context, onSource, onClose, focusInput, open }) {
         <AssistantMark />
         <div className="report-chat-heading">
           <h2 id={`${o}-title`}>Ask this report</h2>
-          <p>Local answers · report evidence</p>
+          <p>{context.propertyId ? "Verified Supabase data" : "Local answers · report evidence"}</p>
         </div>
         <button
           type="button"

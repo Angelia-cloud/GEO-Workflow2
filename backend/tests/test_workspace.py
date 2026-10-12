@@ -72,10 +72,15 @@ def test_rankscale_history_dedupes_and_loads_measurements(new_client):
     assert body["added"] == 54 and body["duplicates"] == 0
     assert body["summary"]["rowCount"] == 54 and body["summary"]["engineCount"] == 3
     assert body["latestImport"]["rowsAdded"] == 54
-    assert body["followUp"]["measurements_loaded"] is True, body["followUp"]
+    assert body["rows"] == []
+    assert body["followUp"]["status"] == "pending"
     again = client.post(f"/api/clients/{new_client['id']}/rankscale/imports",
-                        files={"file": ("synthetic.csv", raw, "text/csv")}).json()
-    assert again["added"] == 0 and again["duplicates"] == 54 and len(again["imports"]) == 2
+                        files={"file": ("synthetic.csv", raw, "text/csv")})
+    assert again.status_code == 200, again.text
+    assert again.json()["added"] == 0 and again.json()["duplicates"] == 54
+    history = client.get(f"/api/clients/{new_client['id']}/rankscale").json()
+    assert len(history["imports"]) == 2
+    assert history["imports"][0]["followUp"]["measurements_loaded"] is True
     scoped = client.get(f"/api/clients/{new_client['id']}/rankscale?date_from=2026-09-01&date_to=2026-09-30").json()
     assert len(scoped["rows"]) == 27 and scoped["summary"]["rowCount"] == 54
     row = scoped["rows"][0]
@@ -84,6 +89,27 @@ def test_rankscale_history_dedupes_and_loads_measurements(new_client):
     assert bad.status_code == 422 and "Missing Rankscale columns" in bad.json()["detail"]
     with connect() as conn:
         conn.execute("delete from properties where id = %s", (new_client["id"],))  # cascades measurements
+        conn.commit()
+
+
+def test_rankscale_upload_queues_measurement_follow_up(new_client, monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        "app.routers.rankscale.service.load_measurements",
+        lambda *args: calls.append(args),
+    )
+    raw = (FIXTURES / "synthetic_rankscale.csv").read_bytes()
+    result = client.post(
+        f"/api/clients/{new_client['id']}/rankscale/imports",
+        files={"file": ("synthetic.csv", raw, "text/csv")},
+    )
+    assert result.status_code == 200, result.text
+    body = result.json()
+    assert body["rows"] == [] and body["followUp"]["status"] == "pending"
+    assert calls[0][0] == new_client["id"]
+    assert calls[0][1] == raw
+    with connect() as conn:
+        conn.execute("delete from properties where id = %s", (new_client["id"],))
         conn.commit()
 
 
@@ -174,7 +200,7 @@ def test_report_assistant(monkeypatch):
     monkeypatch.setenv("GEO_LLM_PROVIDER", "groq")
     context = {"client": {"name": "Coogee"}, "periodLabel": "Sep 2026",
                "topics": [{"id": "summary", "text": "Detection is 48.5%.", "sources": [{"id": "glance", "label": "At a glance"}]}]}
-    assert client.post("/api/report-assistant/ask", json={"question": "What is detection?", "context": context}).json()["fallback"]
+    assert client.post("/api/report-assistant/ask", json={"question": "What is detection?", "context": context}).status_code == 410
     from agents.report_assistant import agent as assistant
     stub = LLM(provider="stub", stub=lambda s, u, schema: {"answer": "Detection is 48.5%.", "supported": True,
                                                             "topic_ids": ["summary"], "coverage": 90})

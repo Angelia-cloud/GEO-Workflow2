@@ -333,6 +333,8 @@ function buildReportContext(A) {
   );
   return {
     key: `generated:${o.id}:${A.period.from}:${A.period.to}:${hashKey(g)}`,
+    propertyId: o.id,
+    period: { from: A.period.from, to: A.period.to },
     client: o,
     periodLabel: n,
     ready: true,

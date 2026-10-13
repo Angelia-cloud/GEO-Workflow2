@@ -16,18 +16,9 @@ const fmtAvailable = (A) =>
   byVisibility = (A) =>
     [...A].sort(
       (e, t) => (metricValueOf(t, "visibility") ?? -1 / 0) - (metricValueOf(e, "visibility") ?? -1 / 0),
-    ),
-  compareToReference = (A, e) =>
-    !isFiniteNumber(A) || !isFiniteNumber(e)
-      ? "cannot be compared with an available reference"
-      : A > e
-        ? "is above its supplied reference"
-        : A < e
-          ? "is below its supplied reference"
-          : "matches its supplied reference";
+    );
 function buildClientStory(A) {
   const e = A.performance,
-    t = A.example === true ? A.exampleData : null,
     i = [],
     n = (p, Y, E, u, F, m) =>
       i.push({
@@ -51,9 +42,7 @@ function buildClientStory(A) {
       {
         label: "Overall visibility",
         value: fmtAvailable(g?.value),
-        body: A.example
-          ? `The full tracking score ${compareToReference(g?.value, g?.baseline)}.`
-          : "Calculated from measured detection and rank in the selected dates.",
+        body: "Calculated from measured detection and rank in the selected dates.",
       },
       {
         label: l.length > 1 ? "Leading guest need" : "Measured guest need",
@@ -79,9 +68,8 @@ function buildClientStory(A) {
           : "Engine measurements will appear after an import.",
       },
     ];
-  if (
-    (a.length &&
-      n(
+  if (a.length) {
+    n(
         "trend",
         "Visibility through the reporting period",
         "Daily observations within the selected dates",
@@ -90,15 +78,14 @@ function buildClientStory(A) {
           title: "Visibility Score by recorded date",
           labels: o.map((p) => fmtDayMonth(p.date)),
           values: o.map((p) => metricValueOf(p, "visibility") ?? null),
-          note: A.example
-            ? "Illustrative tracking runs. The line shows the example pattern."
-            : "Only recorded dates are plotted. Gaps are not zero measurements; connected points do not imply daily tracking.",
+          note: "Only recorded dates are plotted. Gaps are not zero measurements; connected points do not imply daily tracking.",
         },
         `Recorded scores range from ${fmtAvailable(Math.min(...a))} to ${fmtAvailable(Math.max(...a))}. A single high or low run does not establish a lasting change.`,
         "Keep the tracking schedule and questions consistent. Investigate repeated movements before linking a result to a website change.",
-      ),
-    r.length &&
-      n(
+    );
+  }
+  if (r.length) {
+    n(
         "engines",
         "How performance differs by AI engine",
         "Full tracking set; each engine uses its own measured answers",
@@ -114,9 +101,10 @@ function buildClientStory(A) {
         },
         `${engineLabel(r[0].engine)} has the highest recorded visibility at ${fmtAvailable(metricValueOf(r[0], "visibility"))}. This comparison describes the collected questions, not the whole search market.`,
         "Compare the same guest questions across engines. Check which property and third-party pages appear in the weaker answers.",
-      ),
-    l.length &&
-      n(
+    );
+  }
+  if (l.length) {
+    n(
         "intents",
         "Which guest needs the hotel is visible for",
         "Intent labels come from the tracked topics",
@@ -136,90 +124,9 @@ function buildClientStory(A) {
             ? `The measured topics share the same visibility score of ${fmtAvailable(metricValueOf(s, "visibility"))}. The data does not identify a stronger or weaker topic.`
             : `${s.name} leads this selection at ${fmtAvailable(metricValueOf(s, "visibility"))}. ${c.name} is lower at ${fmtAvailable(metricValueOf(c, "visibility"))}.`,
         `Start with the questions behind ${c.name}. Check whether the current pages answer the specific guest need clearly.`,
-      ),
-    t)
-  ) {
-    const p = t.neutral_vs_benchmark?.find((C) => C.metric === "visibility"),
-      Y = t.intent_competition?.find((C) => C.intent === "Romance & Events"),
-      E = [...(Y?.leaders || [])]
-        .filter((C) => isFiniteNumber(C.visibility))
-        .sort((C, R) => R.visibility - C.visibility)[0],
-      u = t.competitors.find((C) => C.is_self),
-      F = u?.short || u?.name || t.property.name,
-      m = [...t.competitors]
-        .filter((C) => isFiniteNumber(C.visibility))
-        .sort((C, R) => R.visibility - C.visibility),
-      j = m.filter((C) => C.visibility === m[0]?.visibility),
-      w = j.length
-        ? `${j.map((C) => C.short || C.name).join(" and ")} ${j.length > 1 ? "share the highest" : "has the highest"} neutral-set visibility at ${fmtAvailable(j[0].visibility)}.`
-        : "No neutral competitor scores are available for these dates.",
-      z = (t.intent_competition || []).filter((C) => C.status === "behind").map((C) => C.intent);
-    n(
-      "comparison",
-      "Full tracking and neutral searches answer different questions",
-      `Full set: ${fmtAvailable(t.prompt_sets.full)} prompts. Neutral comparison: ${fmtAvailable(t.prompt_sets.neutral)} prompts.`,
-      {
-        kind: "table",
-        title: "Comparison context",
-        headers: ["Measure", "Reference", "Current"],
-        rows: [
-          [
-            "Full-set visibility",
-            fmtAvailable(t.baseline_visibility),
-            fmtAvailable(e.metrics.visibility.value),
-          ],
-          ["Neutral visibility", fmtAvailable(p?.benchmark), fmtAvailable(p?.current)],
-          ...(Y ? [[`${Y.intent}: ${F}`, "Neutral prompts", fmtAvailable(Y.coogee)]] : []),
-          ...(E ? [[`${Y.intent}: ${E.name}`, "Same neutral prompts", fmtAvailable(E.visibility)]] : []),
-        ],
-        note: "Illustrative values. Full-set and neutral scores use different question sets and must be interpreted separately.",
-      },
-      `Full-set visibility ${compareToReference(g?.value, t.baseline_visibility)}. Neutral visibility ${compareToReference(p?.current, p?.benchmark)}. These fixed illustrative references do not change with the selected dates.`,
-      "Use full-set results to understand brand discoverability. Use the same neutral prompts when comparing the hotel with competitors.",
     );
-    n(
-      "competitors",
-      "Competitive position on neutral guest searches",
-      "Illustrative neutral competitor set only",
-      {
-        kind: "bars",
-        title: "Neutral-set visibility",
-        labels: m.map((C) => C.short || C.name),
-        values: m.map((C) => C.visibility),
-        note: "Overall neutral-set scores and individual guest intents can have different leaders.",
-      },
-      `${w}${z.length ? ` The hotel is behind the strongest tracked competitor for ${z.join(", ")}.` : ""}`,
-      "Focus competitor research on the guest intents with a gap, rather than copying every competitor page.",
-    );
-    n(
-      "sources",
-      "Where AI finds supporting information",
-      "Illustrative citations for the property",
-      {
-        kind: "table",
-        title: "Top cited sources for the hotel",
-        headers: ["Source", "Source type", "Citations"],
-        rows: t.sources.top_cited.slice(0, 5).map((C) => [C.domain, C.category, fmtAvailable(C.citations)]),
-        note: "Citation counts are illustrative. They describe supporting references, not website visits or bookings.",
-      },
-      "These cited pages provide supporting information for AI answers in the selected dates. Citation counts show where to check the property information.",
-      "Keep property facts consistent across these sources. Prioritise outdated facts and missing occasion information on pages already cited.",
-    );
-    n(
-      "source-gaps",
-      "Sources where competitors have a presence",
-      "Illustrative opportunities to investigate",
-      {
-        kind: "table",
-        title: "Source gaps in the example",
-        headers: ["Source", "Type", "Competitor citations"],
-        rows: t.sources.missing.map((C) => [C.domain, C.category, fmtAvailable(C.for_competitors)]),
-        note: "Presence does not establish that a listing causes visibility. Check suitability and accuracy before taking action.",
-      },
-      "Venue guides and editorial sources appear in competitor answers where this example has no equivalent property citation.",
-      "Check relevant venue listings and editorial opportunities. Add accurate capacity, location and occasion details where appropriate.",
-    );
-  } else if (e) {
+  }
+  if (e) {
     if (e.competitors?.length) {
       n(
         "competitors",
@@ -293,7 +200,7 @@ function buildClientStory(A) {
       );
     }
   }
-  if (!A.example && e?.metrics) {
+  if (e?.metrics) {
     n(
       "reliability",
       "How complete is the measurement?",
@@ -378,7 +285,7 @@ function buildClientStory(A) {
             ? "Reporting team"
             : "Website / content team",
         timing: Y === 0 ? "Next work cycle" : "Following work cycle",
-        measure: p.measure || h[p.id] || p.expected_impact,
+        measure: p.measure || h[p.id] || "Compare equivalent questions and engines in the next reporting period.",
       })),
     Q = [
       [
@@ -386,8 +293,8 @@ function buildClientStory(A) {
         e ? "Included from recorded fields" : "Unavailable in this saved import",
       ],
       [
-        A.example ? "Comparison references" : "Earlier-period performance",
-        A.example ? "Fixed illustrative benchmarks supplied" : "No equivalent comparison baseline selected",
+        "Earlier-period performance",
+        "No equivalent comparison baseline selected",
       ],
       ["Website traffic and conversions", "Requires linked analytics data"],
       ["Paid media spend and audience profiles", "Requires advertising / analytics data"],

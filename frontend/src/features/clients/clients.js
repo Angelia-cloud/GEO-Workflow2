@@ -20,7 +20,7 @@ const nameOf = (value) => (typeof value == "object" && value ? value.name || val
 const clientKeys = (client) =>
   [client?.id, client?.name, client?.property, client?.team, ...(client?.aliases || [])].map(normaliseKey).filter(Boolean);
 
-/** The pilot client. Its September 2026 report is the prepared Komosion report. */
+/** The pilot client. */
 export function coogeeClient() {
   return registry.find((client) => normaliseKey(client.property) === normaliseKey(COOGEE_NAME)) || { id: "", name: COOGEE_NAME, property: COOGEE_NAME };
 }

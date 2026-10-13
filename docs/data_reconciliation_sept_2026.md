@@ -1,5 +1,7 @@
 # Data reconciliation: September 2026 report vs Supabase vs live API
 
+> **Update (Oct 2026):** the Coogee data was reset and re-imported from the two RankScale CSVs (Sep export 1,814 and Oct export 1,543 new measurements; 3,357 total). The September report is no longer a static page: all figures come from live Supabase measurements by Sydney calendar month (September detection 47.74%). The previously published 48.5% figure is retained only as history and cannot be reproduced from stored data.
+
 Property: InterContinental Sydney Coogee Beach (`9ff3cbe8-bbb5-4e8e-8eb0-11e0e8737e45`). Investigated in Stage 1.
 The published September report (`PreparedReport.jsx`) has **not** been changed.
 
@@ -38,3 +40,7 @@ The published September report (`PreparedReport.jsx`) has **not** been changed.
 - 20 stored insights and 4 alerts were generated before the exclusion; regenerate them (`/api/insights/generate`) once the team agrees, as that rewrites stored rows.
 - Three recommendations titled "Publish page" with detail "do it" are test records; they are filtered out of the chatbot but remain in the table.
 - The 16 "Pre-schema baseline" benchmark rows are back-calculated (`is_derived`); the chatbot says so.
+
+## Status of the published 48.5% figure
+
+The 879 / 48.5% September figure cannot be reproduced from the stored RankScale measurements under any tested filter. It is kept here as the published history only; the dashboard reports the stored measurements (September: 866 of 1,814 answers, 47.74%).

@@ -22,9 +22,7 @@ function headlineMetrics(A) {
       visibility: "Combines how often the brand appears with its rank in AI answers. Higher is better.",
       detection: "The share of measured AI answers that mention the tracked brand.",
       position: "Average rank when the brand appears. A lower number is better.",
-      sentiment: A.example
-        ? "The recorded tone of brand mentions in the example."
-        : "Average recorded tone of brand mentions on a \u2212100 to 100 scale.",
+      sentiment: "Average recorded tone of brand mentions on a \u2212100 to 100 scale.",
     },
     t = {
       visibility:
@@ -77,12 +75,9 @@ function headlineMetrics(A) {
       change: B,
       favourable: g,
       definition: e[i],
-      coverage:
-        !A.example && isFin(o.denominator)
-          ? `${fmtLocale(o.denominator, 0)} measured answers${o.missingCount > 0 ? ` \xB7 ${fmtLocale(o.missingCount, 0)} excluded` : ""}`
-          : A.example
-            ? "Full tracking set \xB7 Illustrative data"
-            : "Coverage not recorded",
+      coverage: isFin(o.denominator)
+        ? `${fmtLocale(o.denominator, 0)} measured answers${o.missingCount > 0 ? ` \xB7 ${fmtLocale(o.missingCount, 0)} excluded` : ""}`
+        : "Coverage not recorded",
       meaning: M,
       recommendation: l
         ? i === "detection" && a === 100

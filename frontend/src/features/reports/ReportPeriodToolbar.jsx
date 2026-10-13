@@ -116,6 +116,7 @@ function ReportPeriodToolbar({ period, onApply, onExport, exportDisabled = false
               ref={r}
               id={`${a}-from`}
               type="date"
+              lang="en-AU"
               required
               value={s.from}
               disabled={!!h}
@@ -143,6 +144,7 @@ function ReportPeriodToolbar({ period, onApply, onExport, exportDisabled = false
               ref={l}
               id={`${a}-to`}
               type="date"
+              lang="en-AU"
               required
               value={s.to}
               disabled={!!h}

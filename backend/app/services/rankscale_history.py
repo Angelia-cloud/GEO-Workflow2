@@ -252,32 +252,79 @@ def store_records(client_id: str, parsed: dict[str, Any], file_name: str, import
     import_id = f"rankscale-import-{uuid.uuid4()}"
     with connect() as conn:
         _check_client(conn, client_id)
-        known_answers = {row["answer_id"] for row in conn.execute(
-            "select distinct answer_id from rankscale_records where client_id = %s", (client_id,)).fetchall()}
+        conn.execute("set local statement_timeout = 0")  # large exports exceed the pooler's default timeout
         conn.execute(
             """insert into rankscale_imports (id, client_id, file_name, imported_by, status, rows_processed, rows_total, file_size)
                values (%s, %s, %s, %s, 'loaded', %s, %s, %s)""",
             (import_id, client_id, file_name, imported_by, len(rows), len(rows), file_size))
-        added = 0
-        new_answers = set()
-        with conn.cursor() as cur:
+        conn.execute(
+            """create temporary table rankscale_import_stage
+               (like public.rankscale_records including defaults) on commit drop"""
+        )
+        columns = (
+            "client_id", "id", "answer_id", "ts", "day", "engine", "prompt", "answer", "brand_reference",
+            "topic", "brand_found", "brand_name_mentioned", "brand_rank", "sentiment", "source", "source_fields",
+            "import_id",
+        )
+        copy_sql = "copy pg_temp.rankscale_import_stage ({}) from stdin".format(
+            ", ".join(f'"{column}"' for column in columns)
+        )
+        with conn.cursor().copy(copy_sql) as copy:
             for row in rows:
-                cur.execute(
-                    """insert into rankscale_records (client_id, id, answer_id, ts, day, engine, prompt, answer, brand_reference,
-                              topic, brand_found, brand_name_mentioned, brand_rank, sentiment, source, source_fields, import_id)
-                       values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                       on conflict (client_id, id) do nothing""",
-                    (client_id, row["id"], row["answerId"], row["timestamp"], row["date"], row["engine"], row["prompt"],
-                     row["answer"], row["brandReference"], row["topic"], row["brandFound"], row["brandNameMentioned"],
-                     row["brandRank"], row["sentiment"], Jsonb(row["source"]), Jsonb(row["sourceFields"]), import_id))
-                if cur.rowcount:
-                    added += 1
-                    if row["answerId"] not in known_answers:
-                        new_answers.add(row["answerId"])
+                copy.write_row((
+                    client_id, row["id"], row["answerId"], row["timestamp"], row["date"], row["engine"],
+                    row["prompt"], row["answer"], row["brandReference"], row["topic"], row["brandFound"],
+                    row["brandNameMentioned"], row["brandRank"], row["sentiment"], Jsonb(row["source"]),
+                    Jsonb(row["sourceFields"]), import_id,
+                ))
+        known_answers = {
+            row["answer_id"]
+            for row in conn.execute(
+                """select distinct saved.answer_id
+                   from public.rankscale_records saved
+                   join (select distinct client_id, answer_id from pg_temp.rankscale_import_stage) incoming
+                     on incoming.client_id = saved.client_id and incoming.answer_id = saved.answer_id
+                   where saved.client_id = %s""",
+                (client_id,),
+            ).fetchall()
+        }
+        inserted = conn.execute(
+            """insert into public.rankscale_records
+                   (client_id, id, answer_id, ts, day, engine, prompt, answer, brand_reference, topic, brand_found,
+                    brand_name_mentioned, brand_rank, sentiment, source, source_fields, import_id)
+               select client_id, id, answer_id, ts, day, engine, prompt, answer, brand_reference, topic, brand_found,
+                      brand_name_mentioned, brand_rank, sentiment, source, source_fields, import_id
+               from pg_temp.rankscale_import_stage stage
+               where not exists (select 1 from public.rankscale_records saved
+                                 where saved.client_id = stage.client_id and saved.answer_id = stage.answer_id)
+               on conflict (client_id, id) do nothing
+               returning answer_id"""
+        ).fetchall()
+        added = len(inserted)
+        new_answers = {row["answer_id"] for row in inserted} - known_answers
         conn.execute("update rankscale_imports set rows_added = %s, duplicates = %s, answers_added = %s where id = %s",
                      (added, len(rows) - added, len(new_answers), import_id))
         conn.commit()
     return {"importId": import_id, "added": added, "duplicates": len(rows) - added}
+
+
+def _refresh_months(client_id: str, rows: list[dict]) -> dict[str, Any]:
+    """Months (Australia/Sydney) present in the file: recalculate their metrics, findings and recommendations."""
+    from zoneinfo import ZoneInfo
+    from . import monthly
+    months: set[str] = set()
+    for row in rows:
+        stamp = row.get("timestamp")
+        if isinstance(stamp, str):
+            stamp = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+        if stamp is not None:
+            if stamp.tzinfo is None:
+                stamp = stamp.replace(tzinfo=timezone.utc)
+            months.add(stamp.astimezone(ZoneInfo("Australia/Sydney")).strftime("%Y-%m"))
+    try:
+        return monthly.refresh_intelligence(client_id, sorted(months))
+    except Exception as error:  # noqa: BLE001 — refresh is a follow-up and never fails the upload
+        return {"refresh_error": str(error), "months": sorted(months)}
 
 
 def load_measurements(client_id: str, raw: bytes, file_name: str, imported_by: str | None, import_id: str) -> dict[str, Any]:
@@ -296,6 +343,7 @@ def load_measurements(client_id: str, raw: bytes, file_name: str, imported_by: s
                       for _ in rows]
             with connect() as conn:
                 with conn.transaction():
+                    conn.execute("set local statement_timeout = 0")
                     conn.execute("select pg_advisory_xact_lock(%s)", (loader.LOCK_KEY,))
                     loaded = loader.load_rows_in_transaction(conn, rows, report, imported_by, mapped_rows=mapped)
                     added = loaded.get("added") or {}
@@ -308,6 +356,7 @@ def load_measurements(client_id: str, raw: bytes, file_name: str, imported_by: s
                          added.get("evidence", 0), json.dumps(report.as_dict(), default=str)))
             result = {"measurements_loaded": True, **{k: v for k, v in loaded.items() if k != "report"},
                       **after_load(str(client_id))}
+            result["monthly"] = _refresh_months(str(client_id), rows)
             result["evidence_added"] = (loaded.get("added") or {}).get("evidence")
     except Exception as error:  # noqa: BLE001 — measurements are a follow-up; never fail the upload
         result = {"measurements_loaded": False, "reason": str(error)}
@@ -322,8 +371,31 @@ def import_file(client_id: str, raw: bytes, file_name: str, imported_by: str | N
     imported_at = datetime.now(timezone.utc).isoformat()
     parsed = parse_rankscale_file(raw, client_id, file_name, imported_at)
     stored = store_records(client_id, parsed, file_name, imported_by, len(raw))
-    follow_up = load_measurements(client_id, raw, file_name, imported_by, stored["importId"])
-    history = load_history(client_id)
-    latest = next((entry for entry in history["imports"] if entry["id"] == stored["importId"]), None)
-    return {**history, "latestImport": latest, "added": stored["added"], "duplicates": stored["duplicates"],
-            "followUp": follow_up}
+    latest = {
+        "id": stored["importId"],
+        "importedAt": imported_at,
+        "fileName": file_name,
+        "importedBy": imported_by,
+        "status": "loaded",
+        "rowsProcessed": len(parsed["rows"]),
+        "rowsTotal": len(parsed["rows"]),
+        "rowsAdded": stored["added"],
+        "duplicates": stored["duplicates"],
+        "answersAdded": None,
+        "evidenceAdded": None,
+        "fileSize": len(raw),
+        "followUp": {"measurements_loaded": False, "status": "pending"},
+        "storageMode": STORAGE_MODE,
+    }
+    return {
+        "clientId": str(client_id),
+        "rows": [],
+        "sources": [file_name],
+        "imports": [latest],
+        "latestImport": latest,
+        "summary": parsed["summary"],
+        "storageMode": STORAGE_MODE,
+        "added": stored["added"],
+        "duplicates": stored["duplicates"],
+        "followUp": latest["followUp"],
+    }

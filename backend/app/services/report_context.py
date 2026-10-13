@@ -14,10 +14,9 @@ from .report import build_report
 
 # Documented in docs/data_reconciliation_sept_2026.md. The prepared PDF/HTML report is not a data source here.
 PUBLISHED_SEPT_NOTE = (
-    "The prepared September client report publishes 879 mentions in 1,814 answers (48.5%). Supabase holds the same 1,814 answers "
-    "(RankScale export of 19 Aug to 16 Sep 2026), but counts 796 mentions by RankScale's own brand match (43.9%) and 863 when every "
-    "confirmed hotel alias is counted (47.6%). The 879 figure cannot be reproduced from the stored measurements, so this assistant "
-    "uses the Supabase figures. The published report has not been altered."
+    "The prepared September client report publishes 879 mentions in 1,814 answers (48.5%). That figure cannot be reproduced from the "
+    "Supabase measurements imported from the current RankScale exports, so this assistant uses the Supabase figures. "
+    "The published report has not been altered."
 )
 
 
@@ -31,6 +30,47 @@ def _pct(v: Any) -> str:
 
 def _topic(tid: str, label: str, text: str, terms: str = "") -> dict:
     return {"id": tid, "text": text, "terms": terms, "sources": [_src(tid, label)]}
+
+
+def _commercial_text(property_id: str, df: date, dt: date) -> str:
+    from .opportunities import assess
+    items = assess(property_id, df, dt, save=False)["opportunities"]
+    gaps = [i for i in items if i["visibility"]["status"] == "gap"]
+    required = [i for i in gaps if i["commercial"]["status"] != "Commercially validated"]
+    ranked = sorted((i for i in items if i["commercial"]["rank"]), key=lambda i: i["commercial"]["rank"])
+    text = ("Commercial information (revenue, margins, booking processes, conversion rates, strategic priorities) is only "
+            "what the hotel has confirmed in the platform; anything else is not stored and must not be assumed. ")
+    text += (f"{len(gaps)} intents show a verified visibility gap against competitors: "
+             + "; ".join(f"{i['intent']} ({i['visibility']['gap_points']} pts behind {i['visibility']['top_competitor']}, "
+                         f"{i['commercial']['status']})" for i in gaps) + ". " if gaps else "No intents show a visibility gap. ")
+    if required:
+        text += f"Commercial validation required for {len(required)} of them, so their actions are provisional and not ranked. "
+    if ranked:
+        text += "Ranked by hotel-confirmed priority: " + "; ".join(
+            f"#{i['commercial']['rank']} {i['intent']}" for i in ranked) + "."
+    return text
+
+
+def _monthly_text(property_id: str, dt: date) -> str:
+    from .monthly import cached_month_report, month_key
+    rep = cached_month_report(property_id, month_key(dt))
+    parts = ["Months follow Australia/Sydney calendar days of each measurement's own timestamp. Detection by month: "
+             + "; ".join(f"{m['label']} {m['detection']}% ({m['answers']:,} answers{', partial month' if m['partial'] else ''})"
+                         for m in rep["available_months"]) + "."]
+    cmp_ = rep["comparison"]
+    if cmp_.get("available"):
+        det = cmp_["metrics"].get("detection", {})
+        parts.append(f"{rep['label']} vs {cmp_['previous_month']} ({cmp_['basis'].replace('_', ' ')}"
+                     f"{', ' + cmp_['window'] if cmp_.get('window') else ''}): detection change {det.get('change')} points. "
+                     + "; ".join(f"{c['name']} {c['status']} ({c['change']:+} visibility pts)"
+                                 for c in cmp_.get("engines", []) + cmp_.get("intents", [])
+                                 if c["status"] != "stable" and c.get("change") is not None))
+    else:
+        parts.append(f"No month-over-month comparison for {rep['label']}: {cmp_.get('reason')}")
+    for m in rep["competitor_trend"]:
+        parts.append(f"{m['month']}{' (partial)' if m['partial'] else ''} neutral-prompt visibility: "
+                     + ", ".join(f"{c['name']} {c['visibility']}" for c in m["competitors"]) + ".")
+    return " ".join(parts)
 
 
 def build_context(property_id: str, date_from: date | None = None, date_to: date | None = None) -> dict:
@@ -108,7 +148,7 @@ def build_context(property_id: str, date_from: date | None = None, date_to: date
     comp_n = rep["competitors"][0]["answers"] if rep["competitors"] else None
     topics.append(_topic("competitors", "Competitor comparison", (
         f"Neutral prompt set only ({comp_n} answers), tracked comparison hotels: " + "; ".join(comp_lines) + ". Detection counts answers mentioning each hotel. "
-        "This is a single period; month-by-month competitor history is not yet available."),
+        "Competitor figures here cover the period above."),
         "competitor competitors compare comparison rival rivals hotels versus lead leads leading manly pier langham double bay hyatt"))
 
     topics.append(_topic("intent_competition", "Competitor by intent", "Hotel vs the nearest competitor by intent (visibility): " + "; ".join(
@@ -137,14 +177,20 @@ def build_context(property_id: str, date_from: date | None = None, date_to: date
         + "; ".join(f"[{r['intent']}] {r['title']} ({r['status']}, x{r['n']})" for r in recs[:12]) + "."),
         "recommend recommendations recommendation action actions prioritise priority priorities focus next improve improvement"))
 
-    topics.append(_topic("commercial", "Commercial information", (
-        "No client-confirmed commercial information (revenue potential, margins, booking process, conversion rates or business priorities) "
-        "is stored. Any ranking of opportunities by commercial value requires the hotel to confirm these. Commercial validation is required before treating any recommendation as a business priority."),
-        "revenue profit margin booking bookings conversion commercial priority priorities roi value business weddings corporate"))
+    topics.append(_topic("commercial", "Commercial information and opportunities", _commercial_text(property_id, df, dt),
+        "revenue profit margin booking bookings conversion commercial priority priorities roi value business weddings corporate "
+        "opportunity opportunities validation confirmed ranking rank"))
+
+    try:
+        topics.append(_topic("monthly", "Month-by-month comparison", _monthly_text(property_id, dt),
+                             "month monthly compare comparison previous last change improved declined trend competitor competitors "
+                             "august september october november december month-over-month"))
+    except Exception:  # noqa: BLE001 — monthly history is supplementary; the rest of the context stays valid
+        pass
 
     topics.append(_topic("limits", "Data coverage and limits", (
-        f"Verified RankScale measurements run from {utc['a']} to {utc['b']} (UTC); nothing earlier is stored (no July 2026 data), and the first and last months are partial, "
-        "so complete month-on-month comparisons are not yet available. " + PUBLISHED_SEPT_NOTE),
+        f"Verified RankScale measurements run from {utc['a']} to {utc['b']} (UTC); nothing earlier is stored (no July 2026 data). "
+        "Dates are Australia/Sydney calendar days of each measurement's own timestamp. " + PUBLISHED_SEPT_NOTE),
         "july august september month monthly history trend previous published report difference discrepancy 48.5 879 1814 reconcile"))
 
     return {

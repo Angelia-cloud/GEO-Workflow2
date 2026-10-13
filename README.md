@@ -26,7 +26,7 @@ GEO-Workflow2/
 │           ├── clients/         client directory (/api/clients) and picker
 │           ├── prompt/          Phase 1 wizard (rendered in an isolated iframe) + its API client
 │           ├── rankscale/       upload, import history, saved files
-│           ├── reports/         client report, prepared September 2026 report, report assistant
+│           ├── reports/         client report, live monthly report (`reports/live/`: navigation, header, vital signs, action plan, SVG progress charts, competitor comparison, findings, methodology, appendix; styles in `report.css` scoped under `.rp`), opportunity assessment form (`opportunities/`), report assistant
 │           ├── review/          Workflow 2 review: findings, diagnoses, recommendations, evidence, outcomes
 │           ├── library/         saved transcripts, prompt sheets, uploads and reports
 │           ├── settings/        settings page
@@ -67,6 +67,8 @@ In the Supabase SQL Editor (or `psql`), run in order:
 | `db/09_workflow2.sql` | Auto alerts, insight review, learning memory, agent versions, outcomes |
 | `db/10_import_performance.sql` | Measurement batch index |
 | `db/11_workspace.sql` | **New.** Client fields (client name, team, target audience, goals), team members, library entries/files, Rankscale import history; seeds the four clients and Vy Huynh |
+| `db/13_monthly_imports.sql` | Monthly import provenance (source file, upload time, status) |
+| `db/14_commercial_validation.sql` | Client-confirmed business priorities per intent and saved opportunity assessments |
 | `db/12_data_provenance.sql` | Flags synthetic import batches and excludes them from `v_measurements_flat` (rows are kept). See `docs/data_reconciliation_sept_2026.md` |
 
 `db/03_load_rankscale.sql` is run by the app on every upload. `04_coogee_example.sql` and `05_verify.sql` are optional checks.
@@ -107,16 +109,27 @@ Frontend development with hot reload: keep uvicorn on port 8000 and run `npm run
 | Sign in | Team account card | `GET /api/team` |
 | Pick / create a client | Top-bar client picker, **Create new client** | `GET/POST/PATCH /api/clients` |
 | Phase 1 · brief | Client & goals; edits save to the client | `PATCH /api/clients/{id}` |
-| Phase 1 · transcript → intents | Kickoff transcript (upload, paste or sample), **Generate intents** | `POST /api/prompt-setup/runs`, `/runs/{id}/intents` — `agents/prompt_setup` (AI) or rules |
+| Phase 1 · transcript → intents | Kickoff transcript (upload or paste), **Generate intents** | `POST /api/prompt-setup/runs`, `/runs/{id}/intents` — `agents/prompt_setup` (AI) or rules |
 | Phase 1 · prompts | Prompts per engine, regenerate one, QA scores | `/runs/{id}/prompts`, `/prompts/regenerate` — Prompt Writer + Prompt QA |
 | Phase 1 · Google Sheets | Save & export, CSV download | `/runs/{id}/sheet`, `/complete`, `/export.csv` — writes approved intents/prompts to the DB |
 | Phase 2 · upload | Import Rankscale file (overlapping exports are de-duplicated); measurements and auto alerts continue after the saved-history response | `POST /api/clients/{id}/rankscale/imports` → history + background measurement load + auto alerts |
-| Report | Coogee: prepared September 2026 report. Other clients / periods: report built from the saved records. **Export HTML** | `GET /api/clients/{id}/rankscale`, library entries |
+| Report | Coogee: live report from Supabase measurements, with calendar-month and custom date-range filters, range-aware trend charts and opportunities, chatbot context, and standalone **Export HTML**. Other clients: report built from saved records. | `GET /api/monthly/{id}/months`, `GET /api/monthly/{id}/{YYYY-MM}`, `GET /api/monthly/{id}/range?date_from=YYYY-MM-DD&date_to=YYYY-MM-DD`, `GET /api/opportunities/{id}`, `GET /api/clients/{id}/rankscale` |
 | Ask this report | Chat panel on every report | `POST /api/report-assistant/ask` (AI); keyword matcher when no LLM |
 | Team review → findings | **Team review** button on the report (shown once a client has measurements) | `POST /api/review/{id}/prepare` (alerts + insights), `GET /api/insights/{id}`, `POST /api/feedback` |
 | Team review → explanations | Possible explanations for approved findings | `POST /api/review/{id}/diagnoses` — diagnosis agent (AI or rules) |
 | Team review → recommendations | Approve with owner + due date, reject with reason, edit | `/api/recommendations`, outcome logging |
 | Library | Saved transcripts, prompt sheets, uploads, reports | `/api/library` (entries + original files) |
+
+### Monthly import workflow
+
+Upload each RankScale export (UTF-16 tab-delimited) in the Rankscale step. Months come from each measurement's own timestamp in Australia/Sydney — not from the file name or export date. After an upload the app:
+
+1. validates and stores the rows and an import-history entry (`rankscale_imports`),
+2. loads measurements in the background, skipping any observation already stored (key: prompt + engine + timestamp), so re-uploading a file or overlapping exports never duplicates data and earlier months are never deleted,
+3. recalculates findings and recommendations for every month in the file and clears the monthly and chatbot caches,
+4. makes new months appear in the report's month selector. The custom date-range filter uses the same stored measurements and metric definitions as calendar-month reporting.
+
+A month is labelled *partial* when its data starts or ends more than two days from the month boundary; custom ranges use the same two-day boundary tolerance against the selected dates. The chatbot answers for the selected reporting period from server-built context. Exported HTML embeds the rendered report styles and SVG charts for offline viewing. Commercial priorities stay "Commercial validation required" until the hotel confirms them. Intent and engine name mappings are in `docs/name_mappings.md`.
 
 ### Report metrics
 
@@ -142,6 +155,7 @@ Use **Create new client** in the app (or insert into `properties`). Uploads are 
 
 ## Docs
 
+- `docs/name_mappings.md` — intent and engine alias mappings used by monthly comparisons
 - `docs/data_spec.md` — every Rankscale column and where it goes
 - `docs/diagnosis_framework.md` — diagnosis agent inputs, prompt and outputs
 - `docs/prompt_generation.md` — the prompt agents and the Rankscale round trip

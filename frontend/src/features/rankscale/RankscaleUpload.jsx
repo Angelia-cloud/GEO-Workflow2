@@ -65,7 +65,7 @@ function RankscaleUpload({ client, reviewer, onOpenDashboard }) {
     try {
       const result = await importRankscaleFile(clientId, file, reviewer);
       if (activeClient.current !== clientId) return;
-      await saveSourceFile({
+      void saveSourceFile({
         phase: 2,
         clientId,
         client: client.name,
@@ -99,7 +99,7 @@ function RankscaleUpload({ client, reviewer, onOpenDashboard }) {
             <h1>Upload Rankscale data</h1>
             <p>
               {isCoogee(client)
-                ? "Import your Rankscale file to open the September 2026 report."
+                ? "Import a monthly Rankscale file. New months appear automatically in the monthly report."
                 : "Import your Rankscale file to create a report. Choose your reporting dates in the report."}
             </p>
           </div>

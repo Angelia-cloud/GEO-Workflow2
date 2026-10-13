@@ -1,13 +1,3 @@
-import { isCoogee } from "../clients/clients";
-const SEPTEMBER_2026 = Object.freeze({
-  from: "2026-09-01",
-  to: "2026-09-30",
-});
-export { SEPTEMBER_2026 };
-function isPreparedPeriod(A, e) {
-  return isCoogee(A) && e?.from === SEPTEMBER_2026.from && e?.to === SEPTEMBER_2026.to;
-}
-export { isPreparedPeriod };
 function reportTitle(A) {
   if (!A?.from || !A?.to) {
     return "Report";

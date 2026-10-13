@@ -1,5 +1,4 @@
 import { createElement, useEffect, useRef, useState } from "react";
-import { downloadSample } from "../../lib/samples";
 import { getLibraryFile } from "../library/libraryStore";
 import { loadRankscaleHistory } from "./historyStore";
 const fmtMaybe = (A) => (Number.isFinite(A) ? A.toLocaleString("en-AU") : "\u2014"),
@@ -117,9 +116,6 @@ function RankscaleImportHistory({ client, sources = [], onUpload, onOpenDashboar
           <p>{client?.name || "Choose a client in the top bar to view their imports."}</p>
         </div>
         <div className="library-actions">
-          <button className="guided-secondary" onClick={() => downloadSample("rankscale")}>
-            Download sample CSV
-          </button>
           <button className="guided-secondary" disabled={a || !client?.id} onClick={() => d((m) => m + 1)}>
             Refresh
           </button>

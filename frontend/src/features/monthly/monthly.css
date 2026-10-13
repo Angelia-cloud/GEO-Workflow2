@@ -1,0 +1,9 @@
+.mon-root{margin:32px auto;max-width:1100px;padding:0 16px}
+.mon-note{color:#555;font-size:.9rem}
+.mon-partial{background:#fff3cd;color:#7a5b00;padding:6px 10px;border-radius:6px}
+.mon-error{color:#b03a2e}
+.mon-cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin:12px 0}
+.mon-card{border:1px solid #ddd;border-radius:8px;padding:10px;display:flex;flex-direction:column}
+.mon-card span{font-size:.8rem;color:#666}
+.mon-root table{width:100%;font-size:.85rem;border-collapse:collapse;margin-bottom:12px}
+.mon-root td,.mon-root th{text-align:left;padding:3px 6px;border-bottom:1px solid #eee}

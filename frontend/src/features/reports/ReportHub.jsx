@@ -1,37 +1,29 @@
-import { isCoogee } from "../clients/clients";
+import { LiveReport } from "./live/LiveReport";
 import { ClientReport } from "./ClientReport";
-import { isPreparedPeriod } from "./periods";
-import { PreparedReport } from "./prepared/PreparedReport";
 
 export const REPORT_SECTIONS = [["client", "Report"]];
 
 /**
- * Report area. Coogee's September 2026 report is the prepared Komosion report; every other client and
- * period is generated from the client's saved Rankscale records.
+ * Every client's report is generated live from the stored Rankscale measurements for the applied dates,
+ * in the approved report layout, so each import updates it. A client with no measurements yet falls back
+ * to the saved-records report, which offers the upload.
  */
-function ReportHub({ selectedClient, account, onStartReview, onCreateReport, reportRequest, onReportSaved, overviewSource = "rankscale", onTeamReview }) {
-  const showPrepared = isCoogee(selectedClient) && ["prepared", "example"].includes(overviewSource);
-
+function ReportHub({ selectedClient, account, onStartReview, onCreateReport, reportRequest, onReportSaved, onTeamReview }) {
   function requestReport(period) {
-    onCreateReport?.({ clientId: String(selectedClient.id), period, source: isPreparedPeriod(selectedClient, period) ? "prepared" : "rankscale" });
+    onCreateReport?.({ clientId: String(selectedClient.id), period, source: "rankscale" });
   }
-
-  return (
-    <>
-      {showPrepared ? (
-        <PreparedReport onPeriodApply={requestReport} client={selectedClient} onTeamReview={onTeamReview} />
-      ) : (
-        <ClientReport
-          onPeriodApply={requestReport}
-          client={selectedClient}
-          account={account}
-          request={reportRequest}
-          onUpload={onStartReview}
-          onReportSaved={onReportSaved}
-          onTeamReview={onTeamReview}
-        />
-      )}
-    </>
+  const savedRecordsReport = (
+    <ClientReport
+      onPeriodApply={requestReport}
+      client={selectedClient}
+      account={account}
+      request={reportRequest}
+      onUpload={onStartReview}
+      onReportSaved={onReportSaved}
+      onTeamReview={onTeamReview}
+    />
   );
+  if (!selectedClient?.id) return savedRecordsReport;
+  return <LiveReport key={selectedClient.id} client={selectedClient} account={account} emptyState={savedRecordsReport} onTeamReview={onTeamReview} />;
 }
 export { ReportHub };

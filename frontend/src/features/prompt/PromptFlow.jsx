@@ -78,7 +78,7 @@ function Dialog({ id, labelledBy, open, onClose, children }) {
   );
 }
 
-export function PromptFlow({ api, client, account, openTranscriptRequest = 0, createClientRequest = 0, onCreateClient, onContextChange, onSourceFile, onDownloadSample, onComplete }) {
+export function PromptFlow({ api, client, account, openTranscriptRequest = 0, createClientRequest = 0, onCreateClient, onContextChange, onSourceFile, onComplete }) {
   const doc = useRef(null);
   const rootRef = useRef(null);
   const win = () => rootRef.current?.ownerDocument?.defaultView || window;
@@ -114,7 +114,6 @@ export function PromptFlow({ api, client, account, openTranscriptRequest = 0, cr
   const [transcript, setTranscript] = useState("");
   const [fileName, setFileName] = useState("");
   const [fileEdited, setFileEdited] = useState(false);
-  const [sampleTranscript, setSampleTranscript] = useState(false);
   const [reading, setReading] = useState(false);
   const [transcriptError, setTranscriptError] = useState("");
   const [transcriptConfirmed, setTranscriptConfirmed] = useState(false);
@@ -298,13 +297,13 @@ export function PromptFlow({ api, client, account, openTranscriptRequest = 0, cr
   }
 
   // ---- step 2 handlers -------------------------------------------------------------------
-  function sendSource(file, kind, sample = false, text = transcript) {
+  function sendSource(file, kind, text = transcript) {
     if (!client?.id || !onSourceFile) return;
     const key = `${client.id}|${file.name}|${text}`;
     if (savedSourceKey.current === key) return;
     savedSourceKey.current = key;
     setSourceStatus("Saving in Prompt import history…");
-    onSourceFile({ clientId: client.id, client: client.name, property, file, kind, sample })
+    onSourceFile({ clientId: client.id, client: client.name, property, file, kind })
       .then((saved) =>
         setSourceStatus(saved?.fileStorageMode === "session" ? "Saved for this session only. Download a copy from Prompt import history." : "Saved in Prompt import history."),
       )
@@ -329,11 +328,10 @@ export function PromptFlow({ api, client, account, openTranscriptRequest = 0, cr
       if (text.includes("\u0000")) throw Error("Save your transcript as a UTF-8 text file.");
       setFileName(file.name);
       setFileEdited(false);
-      setSampleTranscript(false);
       setTranscript(text);
       setMode("upload");
       invalidateTranscript();
-      sendSource(file, "upload", false, text);
+      sendSource(file, "upload", text);
     } catch (error) {
       if (version === readVersion.current) setTranscriptError(error.message);
     } finally {
@@ -346,19 +344,9 @@ export function PromptFlow({ api, client, account, openTranscriptRequest = 0, cr
     setReading(false);
     setFileName("");
     setFileEdited(false);
-    setSampleTranscript(false);
     setTranscript("");
     setTranscriptError("");
     invalidateTranscript();
-  }
-
-  function useSample() {
-    clearTranscript();
-    setTranscript(
-      "ILLUSTRATIVE KICKOFF TRANSCRIPT — created for this prototype.\nClient: We want to understand how AI answers recommend our hotel for leisure, family, wellness, business, dining and special occasions.\nTeam: We will review the audience and goals, then create an intent table and a prompt set for export.\nClient: Compare neutral discovery separately from branded questions. Review performance monthly and gather evidence before deciding on content changes.",
-    );
-    setSampleTranscript(true);
-    setMode("paste");
   }
 
   function submitTranscript(event) {
@@ -383,8 +371,7 @@ export function PromptFlow({ api, client, account, openTranscriptRequest = 0, cr
       return;
     }
     if (!fileName || fileEdited) {
-      const name = sampleTranscript ? "Sample-kickoff-transcript.txt" : "Kickoff-transcript.txt";
-      sendSource(new File([transcript], name, { type: "text/plain" }), "paste", sampleTranscript);
+      sendSource(new File([transcript], "Kickoff-transcript.txt", { type: "text/plain" }), "paste");
     }
     setTranscriptConfirmed(true);
     setTranscriptError("");
@@ -408,7 +395,7 @@ export function PromptFlow({ api, client, account, openTranscriptRequest = 0, cr
           targetAudience: market,
           goals,
           transcript,
-          transcriptName: fileName || (sampleTranscript ? "Sample transcript" : "Pasted transcript"),
+          transcriptName: fileName || "Pasted transcript",
           createdBy: account?.name,
         });
         setRun(current);
@@ -763,9 +750,7 @@ export function PromptFlow({ api, client, account, openTranscriptRequest = 0, cr
     : fileName
       ? fileName + (fileEdited ? " · edited" : "")
       : transcript.trim()
-        ? sampleTranscript
-          ? "Sample transcript"
-          : "Pasted transcript"
+        ? "Pasted transcript"
         : "No file selected";
   const promptGenerated = generated.has(promptEngine);
   const visibleIntentCount = items.length;
@@ -1048,14 +1033,6 @@ export function PromptFlow({ api, client, account, openTranscriptRequest = 0, cr
                         {transcript.length.toLocaleString()} / 100,000 characters
                       </span>
                     </label>
-                  </div>
-                  <div className="transcript-help">
-                    <button className="button link small-button" type="button" id="downloadPromptSample" onClick={() => onDownloadSample?.()}>
-                      Download sample transcript
-                    </button>
-                    <button className="button link small-button" type="button" id="useSetupSample" onClick={useSample}>
-                      Use sample
-                    </button>
                   </div>
                   <p id="transcriptError" className="input-error" role="alert">
                     {transcriptError}

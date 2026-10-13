@@ -1,5 +1,4 @@
 import { createElement, useState } from "react";
-import { downloadSample } from "../../lib/samples";
 import { getLibraryFile } from "../library/libraryStore";
 const fmtFileTime = (A) =>
   A && Number.isFinite(Date.parse(A))
@@ -152,9 +151,6 @@ function RankscaleFiles({ entries = [], client, onUpload, onRefresh }) {
             ? `${entries.length} ${entries.length === 1 ? "file" : "files"} in your import history.`
             : "Imported transcripts and pasted text appear here automatically."}
         </p>
-        <button className="guided-secondary" onClick={() => downloadSample("prompt")}>
-          Download sample transcript
-        </button>
       </div>
     </section>
   );

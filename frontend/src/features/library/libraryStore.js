@@ -38,7 +38,7 @@ export async function getLibraryFile(id) {
 }
 
 /** Keep the original source file (kickoff transcript or Rankscale export) in the import history. */
-export async function saveSourceFile({ phase, clientId, client, property, uploadedBy, file, kind = "upload", importId, summary, sample = false }) {
+export async function saveSourceFile({ phase, clientId, client, property, uploadedBy, file, kind = "upload", importId, summary }) {
   if (![1, 2].includes(phase) || !clientId || !file || typeof file.arrayBuffer != "function")
     throw new Error("Select a client and a valid source file before saving.");
   return saveLibraryEntry(
@@ -55,7 +55,6 @@ export async function saveSourceFile({ phase, clientId, client, property, upload
       createdAt: new Date().toISOString(),
       createdBy: uploadedBy || "Not recorded",
       status: "stored",
-      sample,
       importId,
       summary,
     },

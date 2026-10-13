@@ -1,0 +1,23 @@
+.opp-root{margin:32px auto;max-width:1100px;padding:0 16px}
+.opp-note,.opp-meta{color:#555;font-size:.9rem;margin:4px 0}
+.opp-list{display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:16px;margin-top:12px}
+.opp-card{border:1px solid #ddd;border-left:4px solid #bbb;border-radius:8px;padding:14px;background:#fff}
+.opp-card.gap{border-left-color:#c0392b}
+.opp-card.no_gap{border-left-color:#2e8b57}
+.opp-card header{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+.opp-card h3{margin:0;flex:1}
+.opp-card h4{margin:10px 0 2px;font-size:.95rem}
+.opp-card h4 small{font-weight:400;color:#777;margin-left:6px}
+.opp-card table{width:100%;font-size:.85rem;border-collapse:collapse}
+.opp-card td,.opp-card th{text-align:left;padding:2px 4px;border-bottom:1px solid #eee}
+.opp-badge{font-size:.75rem;padding:2px 8px;border-radius:10px}
+.opp-badge.warn{background:#fff3cd;color:#7a5b00}
+.opp-badge.ok{background:#d4edda;color:#1d5b2a}
+.opp-badge.rank{background:#e0e7ff;color:#27348b}
+.opp-missing,.opp-error{color:#b03a2e;font-size:.85rem}
+.opp-form{border:1px solid #ccc;border-radius:8px;padding:14px;margin:12px 0;background:#fafafa}
+.opp-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:10px}
+.opp-grid label{display:flex;flex-direction:column;font-size:.85rem;gap:2px}
+.opp-wide{grid-column:1/-1}
+.opp-actions{display:flex;gap:8px;margin-top:10px}
+.opp-edit{margin-top:10px}

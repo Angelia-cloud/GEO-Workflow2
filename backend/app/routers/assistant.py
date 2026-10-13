@@ -25,6 +25,7 @@ class Ask(BaseModel):
     question: str = Field(min_length=1, max_length=2000)
     date_from: date | None = None
     date_to: date | None = None
+    month: str | None = Field(default=None, pattern=r"^\d{4}-(0[1-9]|1[0-2])$")
 
 
 @router.post("/ask", status_code=410)
@@ -34,13 +35,13 @@ def ask_with_client_context():
 
 
 @router.get("/{property_id}/context")
-def context(property_id: str, date_from: date | None = None, date_to: date | None = None):
-    return _context(property_id, date_from, date_to)
+def context(property_id: str, date_from: date | None = None, date_to: date | None = None, month: str | None = None):
+    return _context(property_id, date_from, date_to, month)
 
 
 @router.post("/{property_id}/ask")
 def ask(property_id: str, body: Ask):
-    ctx = _context(property_id, body.date_from, body.date_to)
+    ctx = _context(property_id, body.date_from, body.date_to, body.month)
     if not ctx.get("ready"):
         return {"text": "There are no verified measurements for this client yet, so I cannot answer report questions.",
                 "confidence": None, "confidenceReason": "No verified measurements.", "sources": [], "supported": False,
@@ -58,11 +59,17 @@ def ask(property_id: str, body: Ask):
         return {"fallback": True, "mode": "rules", "context": ctx, "reason": f"The LLM call failed ({error}); using the keyword matcher."}
 
 
-def _context(property_id: str, date_from: date | None, date_to: date | None) -> dict:
+def _context(property_id: str, date_from: date | None, date_to: date | None, month: str | None = None) -> dict:
     try:
         uuid.UUID(property_id)
     except ValueError as error:
         raise HTTPException(404, "Client not found") from error
+    if month:
+        from ..services.monthly import parse_month
+        try:
+            date_from, date_to = parse_month(month)
+        except ValueError as error:
+            raise HTTPException(422, str(error)) from error
     key = (property_id, date_from, date_to)
     hit = _CACHE.get(key)
     if hit and time.monotonic() - hit[0] < CACHE_SECONDS:

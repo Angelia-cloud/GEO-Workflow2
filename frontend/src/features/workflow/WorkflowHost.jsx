@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { apiFetch } from "../../api/client";
-import { downloadSample } from "../../lib/samples";
 import { PromptFrame } from "../prompt/PromptFrame";
 import { promptSetupApi } from "../prompt/promptSetupApi";
 import { RankscaleUpload } from "../rankscale/RankscaleUpload";
@@ -398,7 +397,6 @@ function WorkflowHost({
         onCreateClient={onCreateClient}
         onContextChange={onContextChange}
         onSourceFile={onPromptSource}
-        onDownloadSample={() => downloadSample("prompt")}
         onComplete={onSetupComplete}
       />
       {inWorkflow && phase === 2 && mode === "rankscale" && (

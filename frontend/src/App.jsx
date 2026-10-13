@@ -9,7 +9,6 @@ import { LibraryPage } from "./features/library/LibraryPage";
 import { listLibrary, saveLibraryEntry, saveSourceFile } from "./features/library/libraryStore";
 import { PromptExports } from "./features/prompt/PromptExports";
 import { buildClientReport } from "./features/reports/model/clientReport";
-import { SEPTEMBER_2026 } from "./features/reports/periods";
 import { REPORT_SECTIONS, ReportHub } from "./features/reports/ReportHub";
 import { SettingsButton, SettingsPage } from "./features/settings/SettingsPage";
 import { WorkflowHost } from "./features/workflow/WorkflowHost";
@@ -165,20 +164,24 @@ function App() {
       let client = selectedClient || defaultClient();
       if (upload?.summary) {
         // An upload loads the records as measurements; refresh so the team review becomes available.
-        const fresh = await loadClients().catch(() => null);
-        if (fresh) {
-          setClients(fresh);
-          client = fresh.find((item) => item.id === client?.id) || client;
-          setSelectedClient(client);
-        }
+        const clientId = client?.id;
+        void loadClients()
+          .then((fresh) => {
+            setClients(fresh);
+            const updated = fresh.find((item) => item.id === clientId);
+            if (updated) setSelectedClient((current) => (current?.id === clientId ? updated : current));
+          })
+          .catch((error) =>
+            setToast(`Upload saved, but client status could not be refreshed. ${error.message}`),
+          );
       }
       if (client && isCoogee(client)) {
         setSelectedClient(client);
-        setReportRequest({ clientId: String(client.id), period: SEPTEMBER_2026, source: "prepared" });
+        setReportRequest(null);
         setReportSection("client");
-        setOverviewSource("prepared");
+        setOverviewSource("rankscale");
         setArea("reports");
-        if (upload?.summary) setToast("Upload complete. September 2026 report is ready.");
+        if (upload?.summary) setToast("Upload complete. The monthly report has been updated.");
         window.scrollTo(0, 0);
         return;
       }
@@ -232,8 +235,8 @@ function App() {
   }, []);
 
   const savePromptSource = useCallback(
-    async ({ clientId, client, property, file, kind, sample }) => {
-      const saved = await saveSourceFile({ phase: 1, clientId, client, property, uploadedBy: account.name, file, kind, sample });
+    async ({ clientId, client, property, file, kind }) => {
+      const saved = await saveSourceFile({ phase: 1, clientId, client, property, uploadedBy: account.name, file, kind });
       await refreshLibrary();
       return saved;
     },
@@ -264,7 +267,6 @@ function App() {
           engines: setup.engines,
           intents: setup.intents,
           prompts: setup.prompts,
-          sample: false,
           sheetSynced: false,
         });
         await refreshLibrary();
@@ -300,7 +302,6 @@ function App() {
             createdBy: reviewer,
             approvedBy: reviewer,
             approvedAt: now,
-            sample: false,
             source: "rankscale",
             period,
             records,
@@ -333,7 +334,6 @@ function App() {
           createdBy: reviewer,
           approvedBy: reviewer,
           approvedAt: now,
-          sample: false,
           summary: review.summary,
           validation: review.validation,
           mapping: review.mapping,
@@ -375,7 +375,6 @@ function App() {
         reviewer: account.name,
         report,
         period: report?.period,
-        sample: false,
       });
       const dataEntry = (await listLibrary()).find((entry) => entry.id === review.dataEntryId);
       if (dataEntry) await saveLibraryEntry({ ...dataEntry, status: "complete", reviewId, reviewCompletedAt: review.completedAt });
@@ -426,7 +425,7 @@ function App() {
     const next = REPORT_SECTIONS.some(([id]) => id === section) ? section : "client";
     const client = selectedClient || defaultClient();
     if (!selectedClient) setSelectedClient(client);
-    if (next === "client" && isCoogee(client)) setOverviewSource("prepared");
+    if (next === "client" && isCoogee(client)) setOverviewSource("rankscale");
     else if (overviewSource === "prepared") setOverviewSource("rankscale");
     setReportSection(next);
     setArea("reports");

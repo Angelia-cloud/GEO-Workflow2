@@ -1,5 +1,4 @@
 import { useId, useRef, useState } from "react";
-import { downloadSample } from "../../lib/samples";
 const fmtInteger = (A) => new Intl.NumberFormat("en-AU").format(Number(A) || 0);
 function fmtHistoryDate(A) {
   if (!A) {
@@ -124,12 +123,6 @@ function RankscaleIntake({
           />
           <button type="button" className="guided-secondary" disabled={!h} onClick={() => c.current?.click()}>
             {uploading ? "Importing\u2026" : busy ? "Loading\u2026" : "Import Rankscale file"}
-          </button>
-        </div>
-        <div className="rankscale-sample-download">
-          <span>Try a fictional dataset</span>
-          <button type="button" className="guided-evidence-link" onClick={() => downloadSample("rankscale")}>
-            Download sample CSV
           </button>
         </div>
         {error && (

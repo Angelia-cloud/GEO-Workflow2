@@ -86,7 +86,7 @@ function useRecTools({ n, extra }) {
   return { isOpen, buttons: (
     <div className="rec-tools">
       <button type="button" className="rt-btn" aria-expanded={isOpen(`ev-${n}`)} aria-controls={`ev-${n}`} onClick={() => toggle(`ev-${n}`)}>Evidence behind this action</button>
-      <button type="button" className="rt-btn" aria-expanded={isOpen(`pl-${n}`)} aria-controls={`pl-${n}`} onClick={() => toggle(`pl-${n}`)}>Mockup &amp; detailed plan</button>
+      <button type="button" className="rt-btn" aria-expanded={isOpen(`pl-${n}`)} aria-controls={`pl-${n}`} onClick={() => toggle(`pl-${n}`)}>Detailed plan</button>
       {extra}
     </div>
   ) };

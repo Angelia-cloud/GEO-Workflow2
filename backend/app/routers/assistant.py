@@ -49,13 +49,11 @@ def ask(property_id: str, body: Ask):
     if not llm_status()["ready"]:
         return {"fallback": True, "mode": "rules", "context": ctx,
                 "reason": "No LLM key is configured; the keyword matcher answers from the same server-built context."}
-    from agents.llm import LLM, LLMError
+    from agents.llm import LLM
     from agents.report_assistant.agent import answer
     try:
         return answer(body.question, ctx, LLM())
-    except LLMError as error:
-        raise HTTPException(502, f"The report assistant could not answer: {error}") from error
-    except Exception as error:  # noqa: BLE001 — provider errors: let the browser use the keyword matcher
+    except Exception as error:  # noqa: BLE001 — provider or output errors: let the browser use the keyword matcher
         return {"fallback": True, "mode": "rules", "context": ctx, "reason": f"The LLM call failed ({error}); using the keyword matcher."}
 
 

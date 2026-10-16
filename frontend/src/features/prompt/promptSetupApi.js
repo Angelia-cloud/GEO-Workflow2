@@ -7,6 +7,7 @@ export const promptSetupApi = {
   engines: () => apiFetch(`${base}/engines`),
   agentInfo: () => apiFetch(`${base}/agents`),
   startRun: (body) => apiFetch(`${base}/runs`, jsonBody(body)),
+  sheets: () => apiFetch(`${base}/sheets`),
   generateIntents: (runId) => apiFetch(`${base}/runs/${runId}/intents`, jsonBody({})),
   saveIntents: (runId, updates, reviewer) => apiFetch(`${base}/runs/${runId}/intents`, jsonBody({ updates, reviewer }, "PATCH")),
   generatePrompts: (runId, body) => apiFetch(`${base}/runs/${runId}/prompts`, jsonBody(body)),

@@ -47,7 +47,14 @@ function SettingsButton({ onClick, active }) {
   );
 }
 export { SettingsButton };
-function SettingsPage({ onOpenImports }) {
+function ReportIcon() {
+  return (
+    <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M4 20V10m6 10V4m6 16v-7m4 7H2" />
+    </svg>
+  );
+}
+function SettingsPage({ onOpenImports, onOpenReportSetup, clientName }) {
   const e = useRef(null);
   useEffect(() => {
     e.current?.focus({
@@ -60,7 +67,7 @@ function SettingsPage({ onOpenImports }) {
         <h1 id="workspaceSettingsTitle" ref={e} tabIndex="-1">
           Settings
         </h1>
-        <p>Manage your workspace files and import history.</p>
+        <p>Manage your workspace files, import history and each client’s report setup.</p>
       </header>
       <button type="button" className="workspace-settings-card" onClick={onOpenImports} aria-label="Imports">
         <span className="workspace-settings-card-icon">
@@ -91,6 +98,21 @@ function SettingsPage({ onOpenImports }) {
           <path d="m9 5 7 7-7 7" />
         </svg>
       </button>
+      {onOpenReportSetup && (
+        <button type="button" className="workspace-settings-card" onClick={onOpenReportSetup} aria-label="Report setup">
+          <span className="workspace-settings-card-icon">
+            <ReportIcon />
+          </span>
+          <span className="workspace-settings-card-copy">
+            <strong>Report setup</strong>
+            <span>The hotel’s names, the questions that name it, its comparison hotels and its baseline, used by the report.</span>
+            <span className="workspace-settings-card-types">{clientName || "Choose a client in the top bar"}</span>
+          </span>
+          <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+            <path d="m9 5 7 7-7 7" />
+          </svg>
+        </button>
+      )}
     </section>
   );
 }

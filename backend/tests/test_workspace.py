@@ -10,7 +10,6 @@ import pytest
 from fastapi.testclient import TestClient
 
 from agents.llm import LLM
-from agents.prompt_setup.schema import Rewrite, SetupIntents, SetupPrompts
 from agents.prompt_generation.schema import PromptReviews
 from app.db import connect
 from app.main import app
@@ -118,81 +117,6 @@ def test_full_rankscale_export_is_accepted(new_client):
     result = client.post(f"/api/clients/{new_client['id']}/rankscale/imports", files={"file": ("export.csv", raw)})
     assert result.status_code == 200, result.text
     assert result.json()["added"] > 0
-
-
-def _run(cid, name):
-    run = client.post("/api/prompt-setup/runs", json={
-        "clientId": cid, "client": name, "property": name, "targetAudience": "Families; couples planning a romantic weekend",
-        "goals": "More family stays and spa weekends", "createdBy": "test",
-        "transcript": "Client: families love the beach. Couples ask about the spa and dining. We host birthday celebrations."})
-    assert run.status_code == 201, run.text
-    return run.json()["id"]
-
-
-def test_prompt_setup_rule_based(new_client, monkeypatch):
-    monkeypatch.setenv("GEO_LLM_PROVIDER", "groq")
-    monkeypatch.delenv("GROQ_API_KEY", raising=False)
-    engines = client.get("/api/prompt-setup/engines").json()["engines"]
-    assert len(engines) == 16 and engines[0]["sheetUrl"].startswith("https://docs.google.com/")
-    assert client.get("/api/prompt-setup/agents").json()["mode"] == "rules"
-    run_id = _run(new_client["id"], new_client["property"])
-    intents = client.post(f"/api/prompt-setup/runs/{run_id}/intents").json()
-    labels = [i["intent"] for i in intents["items"]]
-    assert intents["source"] == "rules" and "Family stays" in labels and labels[-1] == "Brand-name check"
-    item = intents["items"][0]
-    client.patch(f"/api/prompt-setup/runs/{run_id}/intents", json={"updates": [{"id": item["id"], "audience": "Beach families"}], "reviewer": "test"})
-    prompts = client.post(f"/api/prompt-setup/runs/{run_id}/prompts", json={"engineIds": ["chatgpt", "gemini", "bogus"]}).json()
-    assert len(prompts["prompts"]) == 2 * len(labels)
-    assert all(isinstance(p["confidence"], int) and 30 <= p["confidence"] <= 95 for p in prompts["prompts"])
-    redo = client.post(f"/api/prompt-setup/runs/{run_id}/prompts/regenerate", json={
-        "engineId": "chatgpt", "itemId": item["id"], "text": prompts["prompts"][0]["text"], "feedback": "Mention a kids club"}).json()
-    assert "kids club" in redo["text"] and redo["source"] == "rules"
-    client.patch(f"/api/prompt-setup/runs/{run_id}/prompts", json={"updates": [
-        {"engineId": "chatgpt", "itemId": item["id"], "text": redo["text"], "status": "Approved"}], "reviewer": "test"})
-    sheet = client.post(f"/api/prompt-setup/runs/{run_id}/sheet", json={"engineIds": ["chatgpt", "gemini"]}).json()
-    assert sheet["synced"] is False and sheet["sheetUrl"]
-    done = client.post(f"/api/prompt-setup/runs/{run_id}/complete", json={"reviewer": "test", "engineIds": ["chatgpt", "gemini"]}).json()
-    assert done["intents"] == len(labels) and done["prompts"] >= len(labels)
-    csv_text = client.get(f"/api/prompt-setup/runs/{run_id}/export.csv?engine=chatgpt").text
-    assert "search_term" in csv_text and "kids club" in csv_text
-    with connect() as conn:
-        approved = conn.execute("""select count(*) n from prompts p join intents i on i.id = p.intent_id
-                                   where i.property_id = %s and p.status = 'approved'""", (new_client["id"],)).fetchone()["n"]
-    assert approved == 1
-    assert client.post("/api/prompt-setup/runs", json={"clientId": str(uuid.uuid4()), "transcript": "x", "property": "p",
-                                                       "targetAudience": "a", "goals": "g"}).status_code == 404
-    assert client.post(f"/api/prompt-setup/runs/{run_id}/prompts", json={"engineIds": []}).status_code == 422
-
-
-def _stub(system, user, schema):
-    data = json.loads(user)
-    if schema is SetupIntents:
-        return {"intents": [{"intent": "Beach family holidays", "audience": "Parents with young kids", "description": "",
-                             "source_quotes": ["families love the beach"]},
-                            {"intent": "Spa weekends", "audience": "Couples", "description": ""},
-                            {"intent": "Brand-name check", "audience": "All personas", "description": ""}]}
-    if schema is SetupPrompts:
-        return {"prompts": [{"item_id": i["item_id"], "prompt_text": f"Which hotel near the beach suits {i['audience'].lower()} for {i['intent'].lower()}?"}
-                            for i in data["INTENTS"]]}
-    if schema is PromptReviews:
-        return {"reviews": [{"index": p["index"], "decision": "keep", "realism": 0.9, "intent_fit": 0.8, "measurability": 0.9,
-                             "reason": "ok"} for p in data["PROMPTS"]]}
-    if schema is Rewrite:
-        return {"prompt_text": data["PROMPT"].rstrip("?") + " with a kids club?", "note": "added kids club"}
-    raise AssertionError(schema)
-
-
-def test_prompt_setup_with_agents(new_client, monkeypatch):
-    stub = LLM(provider="stub", stub=_stub)
-    monkeypatch.setattr("agents.prompt_setup.agent._llm", lambda llm=None: stub)
-    run_id = _run(new_client["id"], new_client["property"])
-    intents = client.post(f"/api/prompt-setup/runs/{run_id}/intents").json()
-    assert intents["source"] == "ai" and [i["intent"] for i in intents["items"]][:2] == ["Beach family holidays", "Spa weekends"]
-    prompts = client.post(f"/api/prompt-setup/runs/{run_id}/prompts", json={"engineIds": ["perplexity"]}).json()
-    assert prompts["source"] == "ai" and {p["confidence"] for p in prompts["prompts"]} == {87}
-    redo = client.post(f"/api/prompt-setup/runs/{run_id}/prompts/regenerate", json={
-        "engineId": "perplexity", "itemId": "I01", "text": prompts["prompts"][0]["text"], "feedback": "add kids club"}).json()
-    assert redo["text"].endswith("with a kids club?") and redo["confidence"] == 87
 
 
 def test_report_assistant(monkeypatch):

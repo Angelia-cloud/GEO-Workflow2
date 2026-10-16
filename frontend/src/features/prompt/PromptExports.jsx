@@ -175,9 +175,8 @@ function PromptExports({ entries = [], selectedClient, onStartWorkflow }) {
         </div>
       )}
       <p className="pe-note">
-        Generated and edited prompts are ready to export. Any older human approvals keep their recorded status
-        and reviewer. This prototype uses example prompts and is not connected to a live prompt-generation
-        service.
+        Generated and edited prompts are ready to export. Each CSV lists the prompts saved in that run with
+        their review status and reviewer.
       </p>
     </section>
   );

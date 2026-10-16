@@ -16,8 +16,10 @@ so the model can fix it.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
+import time
 from typing import Callable, TypeVar
 
 from pydantic import BaseModel, ValidationError
@@ -26,6 +28,7 @@ T = TypeVar("T", bound=BaseModel)
 
 DEFAULT_MODELS = {"groq": "openai/gpt-oss-20b", "anthropic": "claude-haiku-4-5-20251001"}
 GROQ_BASE_URL = os.environ.get("GROQ_BASE_URL", "https://api.groq.com/openai/v1")
+logger = logging.getLogger(__name__)
 
 
 class LLMError(RuntimeError):
@@ -75,21 +78,26 @@ class LLM:
             extra = {}
             if "gpt-oss" in (self.model or ""):
                 extra["reasoning_effort"] = os.environ.get("GEO_LLM_REASONING", "low")
+            started = time.perf_counter()
             try:
-                resp = client.chat.completions.create(
-                    model=self.model, response_format={"type": "json_object"},
-                    max_completion_tokens=min(max_tokens, int(os.environ.get("GEO_LLM_MAX_OUTPUT", "2500"))),
-                    temperature=0.2,
-                    messages=[{"role": "system", "content": system}, {"role": "user", "content": user}],
-                    **extra)
-            except BadRequestError as e:
-                # Groq rejects replies that aren't valid JSON (json_validate_failed);
-                # return the failed text so json() can send it back for correction
-                body = getattr(e, "body", None) or {}
-                err = body.get("error", body) if isinstance(body, dict) else {}
-                if isinstance(err, dict) and err.get("code") == "json_validate_failed":
-                    return err.get("failed_generation") or ""
-                raise
+                try:
+                    resp = client.chat.completions.create(
+                        model=self.model, response_format={"type": "json_object"},
+                        max_completion_tokens=min(max_tokens, int(os.environ.get("GEO_LLM_MAX_OUTPUT", "2500"))),
+                        temperature=0.2,
+                        messages=[{"role": "system", "content": system}, {"role": "user", "content": user}],
+                        **extra)
+                except BadRequestError as e:
+                    # Groq rejects replies that aren't valid JSON (json_validate_failed);
+                    # return the failed text so json() can send it back for correction
+                    body = getattr(e, "body", None) or {}
+                    err = body.get("error", body) if isinstance(body, dict) else {}
+                    if isinstance(err, dict) and err.get("code") == "json_validate_failed":
+                        return err.get("failed_generation") or ""
+                    raise
+            finally:
+                logger.info("llm_call provider=groq model=%s duration_ms=%.1f",
+                            self.model or "", (time.perf_counter() - started) * 1000)
             return resp.choices[0].message.content or ""
         raise LLMError("unreachable")
 

@@ -1,0 +1,41 @@
+/* Settings → Report setup. Same tokens, type scale and card language as the Settings and Imports pages. */
+.rsu-page{padding:20px 0 48px;color:var(--guided-ink)}
+.rsu-page h1{margin:0;font-size:24px;font-weight:600}
+.rsu-header{margin-bottom:20px}
+.rsu-lead{max-width:720px;margin:8px 0 0;color:var(--guided-muted);font-size:13px;line-height:1.6}
+.rsu-card{max-width:960px;margin-top:16px;padding:22px 24px;border:1px solid var(--guided-line);border-radius:10px;background:#fff}
+.rsu-card h2{margin:0 0 6px;font-size:16px;font-weight:600}
+.rsu-hint{margin:4px 0 0;color:var(--guided-muted);font-size:12px;line-height:1.55}
+.rsu-grid{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.4fr);gap:18px;margin-top:14px}
+.rsu-grid-3{grid-template-columns:minmax(0,.8fr) minmax(0,1.2fr) minmax(0,1.4fr);margin-top:8px}
+.rsu-grid-4{grid-template-columns:repeat(4,minmax(0,1fr))}
+.rsu-field{display:flex;flex-direction:column;min-width:0}
+.rsu-field label{font-size:12px;font-weight:600;color:var(--guided-ink)}
+.rsu-field input,.rsu-field textarea{margin-top:8px;width:100%;box-sizing:border-box;padding:9px 11px;border:1px solid #cfd8e6;border-radius:6px;background:#fff;color:var(--guided-ink);font:inherit;font-size:13px;line-height:1.45}
+.rsu-field textarea{resize:vertical;min-height:72px}
+.rsu-field input:focus,.rsu-field textarea:focus{outline:2px solid #b9d3f3;outline-offset:0;border-color:var(--guided-blue)}
+.rsu-suggestions{margin-top:16px;padding-top:14px;border-top:1px solid #edf1f6}
+.rsu-suggestions-title{display:block;color:var(--guided-muted);font-size:11px;font-weight:600;letter-spacing:.02em;text-transform:uppercase}
+.rsu-chips{display:flex;flex-wrap:wrap;gap:8px;margin-top:10px}
+.rsu-chip{display:inline-flex;align-items:center;gap:6px;min-height:30px;padding:5px 11px;border:1px solid #d7e3f3;border-radius:999px;background:#f5f9ff;color:var(--guided-ink);font:inherit;font-size:12px;cursor:pointer}
+.rsu-chip:hover{border-color:var(--guided-blue);background:#eaf2fc}
+.rsu-chip>span[aria-hidden]{color:var(--guided-blue);font-weight:600}
+.rsu-chip-count{color:var(--guided-muted);font-size:11px}
+.rsu-stat{margin:14px 0 0;font-size:13px}
+.rsu-details{margin-top:8px;font-size:12px;color:var(--guided-muted)}
+.rsu-details summary{cursor:pointer;color:var(--guided-blue)}
+.rsu-details ul{margin:8px 0 0;padding-left:18px;line-height:1.6}
+.rsu-empty{margin:14px 0 0;color:var(--guided-muted);font-size:12px}
+.rsu-competitor{margin-top:14px;padding:14px 16px;border:1px solid #e3e9f2;border-radius:8px;background:#fbfcfe}
+.rsu-competitor-head{display:flex;align-items:center;justify-content:space-between}
+.rsu-number{display:grid;place-items:center;width:24px;height:24px;border-radius:50%;background:#eaf2fc;color:var(--guided-blue);font-size:11px;font-weight:600}
+.rsu-link{padding:0;border:0;background:none;color:#a0453d;font:inherit;font-size:12px;cursor:pointer}
+.rsu-add{margin-top:14px}
+.rsu-check{display:flex;align-items:center;gap:8px;margin-top:10px;font-size:13px}
+.rsu-footer{position:sticky;bottom:0;display:flex;align-items:center;justify-content:flex-end;gap:16px;max-width:960px;margin-top:20px;padding:14px 0;border-top:1px solid var(--guided-line);background:var(--guided-paper,#f7f9fc)}
+.rsu-notice{color:var(--guided-muted);font-size:12px}
+.rsu-error{color:#a0453d;font-size:12px}
+@media (max-width:860px){
+  .rsu-grid,.rsu-grid-3,.rsu-grid-4{grid-template-columns:minmax(0,1fr)}
+  .rsu-card{padding:18px}
+}

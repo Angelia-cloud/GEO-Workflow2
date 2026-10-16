@@ -74,38 +74,38 @@ def test_month_parsing_and_coverage():
 
 
 def test_period_trend_keeps_historical_context_and_marks_selected_windows(monkeypatch):
-    class _Result:
-        def __init__(self, start, end):
-            self.start = start
-            self.end = end
-
-        def fetchone(self):
-            return {"first_day": self.start, "last_day": self.end, "days_with_data": (self.end - self.start).days + 1}
-
-    class _Connection:
-        def execute(self, _query, params):
-            return _Result(params[1], params[2])
-
-    monkeypatch.setattr(monthly, "_group", lambda *_args: [{"answers": 10, "detection": 50.0}])
-    monkeypatch.setattr(monthly, "_hotel_neutral", lambda *_args: {"answers": 5, "detection": 60.0})
-    monkeypatch.setattr(monthly, "_month_competitors", lambda *_args: [
-        {"display_name": "Coogee", "answers": 5, "detection": 40.0, "visibility": 30.0, "is_self": False},
-    ])
-    monkeypatch.setattr(monthly, "_prompt_counts", lambda *_args: {"tracked_questions": 2, "comparison_questions": 1})
     months = [{"month": "2026-08"}, {"month": "2026-09"}]
-
-    trend = monthly._period_trend(
-        _Connection(), "property", "Coogee", months, date(2026, 9, 12), date(2026, 9, 20),
-    )
-
-    assert [(point["from"], point["to"]) for point in trend] == [
+    segments = monthly._trend_segments(months, date(2026, 9, 12), date(2026, 9, 20))
+    assert [(a.isoformat(), b.isoformat()) for a, b, _ in segments] == [
         ("2026-08-01", "2026-08-15"),
         ("2026-08-16", "2026-08-31"),
         ("2026-09-01", "2026-09-11"),
         ("2026-09-12", "2026-09-15"),
         ("2026-09-16", "2026-09-20"),
     ]
-    assert [point["selected_period"] for point in trend] == [False, False, False, True, True]
+    assert [selected for *_, selected in segments] == [False, False, False, True, True]
+
+    # every window's figures are read in one batch and each window becomes one trend point
+    def fake_run_many(_conn, statements):
+        rows = []
+        for sql, params in statements:
+            if "min(day) as first_day" in sql:
+                start, end = params[1], params[2]
+                rows.append([{"first_day": start, "last_day": end, "days_with_data": (end - start).days + 1}])
+            elif "competitor_groups" in sql:
+                rows.append([{"name": "Coogee", "display_name": "Coogee", "answers": 5, "detection": 40.0,
+                              "visibility": 30.0}])
+            elif "tracked_questions" in sql:
+                rows.append([{"tracked_questions": 2, "comparison_questions": 1}])
+            else:
+                rows.append([{"answers": 10, "detection": 50.0}])
+        return rows
+
+    monkeypatch.setattr(monthly, "run_many", fake_run_many)
+    trend = monthly._period_trend(None, "property", "Other hotel", months, date(2026, 9, 12), date(2026, 9, 20))
+    assert [(p["from"], p["to"], p["selected_period"]) for p in trend] == [
+        (a.isoformat(), b.isoformat(), sel) for a, b, sel in segments]
+    assert trend[0]["comparison"]["competitors"][0]["name"] == "Coogee"
 
 
 def test_months_come_from_measurement_timestamps_and_sum_to_total(conn):

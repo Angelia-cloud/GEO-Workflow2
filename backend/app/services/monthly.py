@@ -18,9 +18,10 @@ from datetime import date, timedelta
 from decimal import Decimal
 from typing import Any
 
-from ..db import connect
+from ..db import connect, run_many
 from .name_mappings import canonical_intent, sql_map
-from .report import METRICS, _cols, _metric_sql, _num, competitor_metrics, movement
+from .report import (METRICS, _cols, _metric_sql, _num, competitor_metrics, competitor_metrics_query, movement,
+                     short_name)
 
 MONTH_RE = re.compile(r"^(\d{4})-(0[1-9]|1[0-2])$")
 BOUNDARY_TOLERANCE_DAYS = 2   # data within this many days of a month boundary still counts as covering it
@@ -87,33 +88,62 @@ def list_months(property_id: str) -> list[dict[str, Any]]:
     return months
 
 
-def _group(conn, pid, dim, df, dt, names="rankscale", neutral=False):
-    """Metrics for the property, optionally by intent or engine. Duplicate names are merged through
-    name_mappings at read time; the stored measurements are untouched."""
+def _group_query(pid, dim, df, dt, names="rankscale", neutral=False) -> tuple[str, tuple]:
     found, rank, sent = _cols(names)
     extra = " and a.is_neutral" if neutral else ""
     if dim in ("engine", "intent"):
         values, params = sql_map(dim)
-        rows = conn.execute(f"""select coalesce(m.canon, a.{dim}) as name, {_metric_sql(found, rank, sent)}
-                                from v_answer_scores a
-                                left join (values {values}) as m(alias, canon) on lower(btrim(a.{dim})) = m.alias
-                                where a.property_id = %s and a.day between %s and %s{extra}
-                                group by coalesce(m.canon, a.{dim}) order by 1""",
-                            (*params, pid, df, dt)).fetchall()
-    else:
-        rows = conn.execute(f"""select {_metric_sql(found, rank, sent)}
-                                from v_answer_scores where property_id = %s and day between %s and %s{extra.replace('a.', '')}""",
-                            (pid, df, dt)).fetchall()
-    return [_num(r) for r in rows]
+        return (f"""select coalesce(m.canon, a.{dim}) as name, {_metric_sql(found, rank, sent)}
+                    from v_answer_scores a
+                    left join (values {values}) as m(alias, canon) on lower(btrim(a.{dim})) = m.alias
+                    where a.property_id = %s and a.day between %s and %s{extra}
+                    group by coalesce(m.canon, a.{dim}) order by 1""", (*params, pid, df, dt))
+    return (f"""select {_metric_sql(found, rank, sent)}
+                from v_answer_scores where property_id = %s and day between %s and %s{extra.replace('a.', '')}""",
+            (pid, df, dt))
+
+
+def _group(conn, pid, dim, df, dt, names="rankscale", neutral=False):
+    """Metrics for the property, optionally by intent or engine. Duplicate names are merged through
+    name_mappings at read time; the stored measurements are untouched."""
+    sql, params = _group_query(pid, dim, df, dt, names, neutral)
+    return [_num(r) for r in conn.execute(sql, params).fetchall()]
+
+
+class _Batch:
+    """Independent read queries sent together (one network round trip); each result keeps its own shaping."""
+
+    def __init__(self):
+        self._items: list[tuple[str, Any, Any]] = []
+
+    def add(self, sql: str, params: Any, shape=lambda rows: rows) -> int:
+        self._items.append((sql, params, shape))
+        return len(self._items) - 1
+
+    def group(self, *args, **kwargs) -> int:
+        sql, params = _group_query(*args, **kwargs)
+        return self.add(sql, params, lambda rows: [_num(r) for r in rows])
+
+    def overall(self, pid: str, df: date, dt: date) -> tuple[int, int]:
+        return self.group(pid, None, df, dt), self.group(pid, None, df, dt, names="all")
+
+    def run(self, conn) -> list[Any]:
+        rows = run_many(conn, [(sql, params) for sql, params, _ in self._items])
+        return [shape(r) for (_, _, shape), r in zip(self._items, rows)]
+
+
+def _overall_from(rs_rows: list[dict[str, Any]], all_rows: list[dict[str, Any]]) -> dict[str, Any]:
+    base = rs_rows[0] if rs_rows and rs_rows[0].get("answers") else {}
+    if base:
+        base["detection_any_alias"] = all_rows[0]["detection"]
+    return base
 
 
 def _overall(conn, pid: str, df: date, dt: date) -> dict[str, Any]:
-    rows = _group(conn, pid, None, df, dt)
-    base = rows[0] if rows and rows[0].get("answers") else {}
-    if base:
-        any_row = _group(conn, pid, None, df, dt, names="all")[0]
-        base["detection_any_alias"] = any_row["detection"]
-    return base
+    batch = _Batch()
+    a, b = batch.overall(pid, df, dt)
+    out = batch.run(conn)
+    return _overall_from(out[a], out[b])
 
 
 def _deltas(current: dict[str, Any], previous: dict[str, Any]) -> dict[str, Any]:
@@ -174,48 +204,69 @@ def _comparison(conn, pid: str, month: str, current_cov: dict[str, Any], months:
         basis = "matched_days"
         cur_from, cur_to = start.replace(day=window[0]), start.replace(day=window[1])
         prev_from, prev_to = pstart.replace(day=window[0]), pstart.replace(day=window[1])
-    current = _overall(conn, pid, cur_from, cur_to)
-    previous = _overall(conn, pid, prev_from, prev_to)
+    batch = _Batch()
+    cur_q, prev_q = batch.overall(pid, cur_from, cur_to), batch.overall(pid, prev_from, prev_to)
+    groups = [batch.group(pid, dim, a, b) for dim in ("intent", "engine")
+              for a, b in ((cur_from, cur_to), (prev_from, prev_to))]
+    out = batch.run(conn)
+    current, previous = _overall_from(*(out[i] for i in cur_q)), _overall_from(*(out[i] for i in prev_q))
     result = {"available": True, "previous_month": prev_key, "basis": basis,
               "window": None if not window else f"days {window[0]}–{window[1]} of each month",
               "current_answers": current.get("answers"), "previous_answers": previous.get("answers"),
               "metrics": _deltas(current, previous),
-              "intents": _changes(_group(conn, pid, "intent", cur_from, cur_to), _group(conn, pid, "intent", prev_from, prev_to)),
-              "engines": _changes(_group(conn, pid, "engine", cur_from, cur_to), _group(conn, pid, "engine", prev_from, prev_to))}
+              "intents": _changes(out[groups[0]], out[groups[1]]),
+              "engines": _changes(out[groups[2]], out[groups[3]])}
     if basis == "matched_days":
         result["caveat"] = ("One of the months is partial, so both were compared over the days they share "
                             "to keep the comparison like for like.")
     return result
 
 
+def _month_competitors_query(pid: str, df: date, dt: date) -> tuple[str, dict]:
+    return competitor_metrics_query(pid, df, dt, answer_table="v_answer_scores",
+                                    competitor_table="v_competitor_answer_scores")
+
+
+def _month_competitors_shape(property_name: str):
+    return lambda rows: [{**_num(r), "name": r["name"], "display_name": r.get("display_name") or r["name"],
+                          "is_self": r["name"] == property_name} for r in rows]
+
+
 def _month_competitors(conn, pid: str, df: date, dt: date, property_name: str) -> list[dict[str, Any]]:
-    rows = competitor_metrics(conn, pid, df, dt, answer_table="v_answer_scores",
-                              competitor_table="v_competitor_answer_scores")
-    return [{**_num(r), "name": r["name"], "display_name": r.get("display_name") or r["name"],
-             "is_self": r["name"] == property_name} for r in rows]
+    sql, params = _month_competitors_query(pid, df, dt)
+    return _month_competitors_shape(property_name)(conn.execute(sql, params).fetchall())
+
+
+def _hotel_neutral_from(rows: list[dict[str, Any]]) -> dict[str, Any] | None:
+    return rows[0] if rows and rows[0].get("answers") else None
 
 
 def _hotel_neutral(conn, pid: str, df: date, dt: date) -> dict[str, Any] | None:
     """The hotel on the same neutral prompt set the competitors are measured on (fair comparison)."""
-    rows = _group(conn, pid, None, df, dt, neutral=True)
-    return rows[0] if rows and rows[0].get("answers") else None
+    return _hotel_neutral_from(_group(conn, pid, None, df, dt, neutral=True))
 
 
 def _intent_competitors(conn, pid: str, df: date, dt: date) -> list[dict[str, Any]]:
     """Per guest-need ranking: the hotel and each tracked competitor on neutral prompts only."""
-    hotel = {r["name"]: r for r in _group(conn, pid, "intent", df, dt, neutral=True)}
-    questions = {str(r["intent_id"]): r["n"] for r in conn.execute(
-        """select intent_id, count(distinct prompt_id) as n from v_answer_scores
-           where property_id = %s and is_neutral and day between %s and %s group by intent_id""",
-        (pid, df, dt)).fetchall()}
+    batch = _Batch()
+    hotel_q = batch.group(pid, "intent", df, dt, neutral=True)
+    questions_q = batch.add("""select intent_id, count(distinct prompt_id) as n from v_answer_scores
+                               where property_id = %s and is_neutral and day between %s and %s group by intent_id""",
+                            (pid, df, dt))
+    intents_q = batch.add("select id, name from intents where property_id = %s order by name", (pid,))
+    first = batch.run(conn)
+    hotel = {r["name"]: r for r in first[hotel_q]}
+    questions = {str(r["intent_id"]): r["n"] for r in first[questions_q]}
+    wanted = [i for i in first[intents_q] if canonical_intent(i["name"]) in hotel]
+    per_intent = _Batch()
+    for intent in wanted:
+        per_intent.add(*competitor_metrics_query(pid, df, dt, intent_id=str(intent["id"]),
+                                                 answer_table="v_answer_scores",
+                                                 competitor_table="v_competitor_answer_scores"))
     out = []
-    for intent in conn.execute("select id, name from intents where property_id = %s order by name", (pid,)).fetchall():
+    for intent, comps in zip(wanted, per_intent.run(conn)):
         name = canonical_intent(intent["name"])
-        h = hotel.get(name)
-        if not h:
-            continue
-        comps = competitor_metrics(conn, pid, df, dt, intent_id=str(intent["id"]),
-                                   answer_table="v_answer_scores", competitor_table="v_competitor_answer_scores")
+        h = hotel[name]
         out.append({"intent": name, "answers": h["answers"], "questions": questions.get(str(intent["id"]), 0),
                     "hotel": {"visibility": h["visibility"], "detection": h["detection"]},
                     "competitors": [{"name": c.get("display_name") or c["name"],
@@ -226,37 +277,54 @@ def _intent_competitors(conn, pid: str, df: date, dt: date) -> list[dict[str, An
 
 def _monthly_trend(conn, pid: str, months: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Hotel detection / visibility per month and per engine, same definition every month."""
-    out = []
+    batch, slots = _Batch(), []
     for m in months:
         start, end = parse_month(m["month"])
-        overall = _group(conn, pid, None, start, end)[0]
-        prompt_counts = _prompt_counts(conn, pid, start, end)
+        slots.append((batch.group(pid, None, start, end), batch.add(*_prompt_counts_query(pid, start, end)),
+                      batch.group(pid, "engine", start, end)))
+    results = batch.run(conn)
+    out = []
+    for m, (overall_q, counts_q, engines_q) in zip(months, slots):
+        overall = results[overall_q][0]
+        prompt_counts = _prompt_counts_from(results[counts_q])
         out.append({"month": m["month"], "label": m["label"], "partial": m["partial"], "partial_reason": m["partial_reason"],
                     "answers": overall["answers"], "detection": overall["detection"], "visibility": overall["visibility"],
                     **prompt_counts,
                     "engines": [{"name": e["name"], "answers": e["answers"], "detection": e["detection"]}
-                                for e in _group(conn, pid, "engine", start, end)]})
+                                for e in results[engines_q]]})
     return out
 
 
 def _competitor_trend(conn, pid: str, property_name: str, months: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    out = []
+    batch, slots = _Batch(), []
     for m in months:
         start, end = parse_month(m["month"])
-        rows = _month_competitors(conn, pid, start, end, property_name)
-        out.append({"month": m["month"], "partial": m["partial"], "hotel": _hotel_neutral(conn, pid, start, end),
+        slots.append((batch.add(*_month_competitors_query(pid, start, end), _month_competitors_shape(property_name)),
+                      batch.group(pid, None, start, end, neutral=True)))
+    results = batch.run(conn)
+    out = []
+    for m, (comp_q, hotel_q) in zip(months, slots):
+        rows = results[comp_q]
+        out.append({"month": m["month"], "partial": m["partial"], "hotel": _hotel_neutral_from(results[hotel_q]),
                     "competitors": [{"name": r["display_name"], "visibility": r["visibility"], "detection": r["detection"],
                                      "is_self": r["is_self"]} for r in rows]})
     return out
 
 
-def _prompt_counts(conn, pid: str, start: date, end: date) -> dict[str, int]:
-    row = conn.execute("""
-        select count(distinct prompt_id) as tracked_questions,
-               count(distinct prompt_id) filter (where is_neutral) as comparison_questions
-        from v_answer_scores where property_id = %s and day between %s and %s""",
-        (pid, start, end)).fetchone()
+def _prompt_counts_query(pid: str, start: date, end: date) -> tuple[str, tuple]:
+    return ("""select count(distinct prompt_id) as tracked_questions,
+                      count(distinct prompt_id) filter (where is_neutral) as comparison_questions
+               from v_answer_scores where property_id = %s and day between %s and %s""", (pid, start, end))
+
+
+def _prompt_counts_from(rows: list[dict[str, Any]]) -> dict[str, int]:
+    row = rows[0]
     return {"tracked_questions": row["tracked_questions"], "comparison_questions": row["comparison_questions"]}
+
+
+def _prompt_counts(conn, pid: str, start: date, end: date) -> dict[str, int]:
+    sql, params = _prompt_counts_query(pid, start, end)
+    return _prompt_counts_from(conn.execute(sql, params).fetchall())
 
 
 def _half_month_windows(months: list[dict[str, Any]]) -> list[tuple[date, date]]:
@@ -270,62 +338,75 @@ def _half_month_windows(months: list[dict[str, Any]]) -> list[tuple[date, date]]
     return windows
 
 
-def _period_trend(conn, pid: str, property_name: str, months: list[dict[str, Any]],
-                  selected_start: date, selected_end: date) -> list[dict[str, Any]]:
-    """Verified half-month history through the selected end, marking the applied range."""
-    trend = []
+def _trend_segments(months: list[dict[str, Any]], selected_start: date,
+                    selected_end: date) -> list[tuple[date, date, bool]]:
+    """Half-month windows through the selected end; windows cut at the selected start, which is marked."""
+    segments = []
     for window_start, window_end in _half_month_windows(months):
         if window_start > selected_end:
             break
-        segments = []
         if window_start < selected_start:
             before_end = min(window_end, selected_start - timedelta(days=1))
             if window_start <= before_end:
                 segments.append((window_start, before_end, False))
         if window_end >= selected_start and window_start <= selected_end:
             segments.append((max(window_start, selected_start), min(window_end, selected_end), True))
-        for start, end, selected in segments:
-            overall_rows = _group(conn, pid, None, start, end)
-            overall = overall_rows[0] if overall_rows else {}
-            if not overall.get("answers"):
-                continue
-            coverage_row = conn.execute("""
-                select min(day) as first_day, max(day) as last_day, count(distinct day) as days_with_data
-                from v_answer_scores where property_id = %s and day between %s and %s""",
-                (pid, start, end)).fetchone()
-            cov = coverage(start, end, coverage_row["first_day"], coverage_row["last_day"], coverage_row["days_with_data"])
-            neutral = _hotel_neutral(conn, pid, start, end)
-            competitor_rows = _month_competitors(conn, pid, start, end, property_name)
-            prompt_counts = _prompt_counts(conn, pid, start, end)
-            label = f"{start.day} {calendar.month_abbr[start.month]}" if start == end else (
-                f"{start.day}–{end.day} {calendar.month_abbr[end.month]}")
-            trend.append({
-                "from": start.isoformat(), "to": end.isoformat(),
-                "label": label, "selected_period": selected,
-                "partial": cov["partial"], "partial_reason": cov["partial_reason"],
-                "answers": overall["answers"], "detection": overall["detection"],
-                "tracked_questions": prompt_counts["tracked_questions"],
-                "comparison": {
-                    "hotel": neutral,
-                    "questions": prompt_counts["comparison_questions"],
-                    "competitors": [{"name": row["display_name"], "answers": row["answers"], "detection": row["detection"],
-                                     "visibility": row["visibility"], "is_self": row["is_self"]}
-                                    for row in competitor_rows],
-                },
-            })
+    return segments
+
+
+def _period_trend(conn, pid: str, property_name: str, months: list[dict[str, Any]],
+                  selected_start: date, selected_end: date) -> list[dict[str, Any]]:
+    """Verified half-month history through the selected end, marking the applied range."""
+    segments = _trend_segments(months, selected_start, selected_end)
+    batch, slots = _Batch(), []
+    for start, end, _selected in segments:  # every segment's figures in one round trip
+        slots.append((
+            batch.group(pid, None, start, end),
+            batch.add("""select min(day) as first_day, max(day) as last_day, count(distinct day) as days_with_data
+                         from v_answer_scores where property_id = %s and day between %s and %s""", (pid, start, end)),
+            batch.group(pid, None, start, end, neutral=True),
+            batch.add(*_month_competitors_query(pid, start, end), _month_competitors_shape(property_name)),
+            batch.add(*_prompt_counts_query(pid, start, end)),
+        ))
+    results = batch.run(conn)
+    trend = []
+    for (start, end, selected), (overall_q, coverage_q, neutral_q, competitors_q, counts_q) in zip(segments, slots):
+        overall_rows = results[overall_q]
+        overall = overall_rows[0] if overall_rows else {}
+        if not overall.get("answers"):
+            continue
+        coverage_row = results[coverage_q][0]
+        cov = coverage(start, end, coverage_row["first_day"], coverage_row["last_day"], coverage_row["days_with_data"])
+        neutral = _hotel_neutral_from(results[neutral_q])
+        competitor_rows = results[competitors_q]
+        prompt_counts = _prompt_counts_from(results[counts_q])
+        label = f"{start.day} {calendar.month_abbr[start.month]}" if start == end else (
+            f"{start.day}–{end.day} {calendar.month_abbr[end.month]}")
+        trend.append({
+            "from": start.isoformat(), "to": end.isoformat(),
+            "label": label, "selected_period": selected,
+            "partial": cov["partial"], "partial_reason": cov["partial_reason"],
+            "answers": overall["answers"], "detection": overall["detection"],
+            "tracked_questions": prompt_counts["tracked_questions"],
+            "comparison": {
+                "hotel": neutral,
+                "questions": prompt_counts["comparison_questions"],
+                "competitors": [{"name": row["display_name"], "answers": row["answers"], "detection": row["detection"],
+                                 "visibility": row["visibility"], "is_self": row["is_self"]}
+                                for row in competitor_rows],
+            },
+        })
     return trend
 
 
 def _stored_findings(conn, pid: str, df: date, dt: date) -> dict[str, Any]:
-    insights = conn.execute("""
+    insights, diagnoses, recs = run_many(conn, [("""
         select distinct on (i.intent_id, i.engine_id, i.insight_type)
                i.id, i.insight_type, i.title, i.summary as finding, i.status, i.generated_by, i.period_start, i.period_end,
                (i.metrics->>'answers')::int as evidence_count
         from intelligence i
         where i.property_id = %s and i.period_start >= %s and i.period_end <= %s
-        order by i.intent_id, i.engine_id, i.insight_type, i.created_at desc""", (pid, df, dt)).fetchall()
-    insights = sorted(insights, key=lambda r: -(r["evidence_count"] or 0))
-    diagnoses = conn.execute("""
+        order by i.intent_id, i.engine_id, i.insight_type, i.created_at desc""", (pid, df, dt)), ("""
         select d.id, d.diagnosis_type, d.root_cause, d.severity, d.confidence_score, d.status, d.generated_by,
                i.name as intent, e.name as engine, m.measured_at,
                (select count(*) from evidence ev where ev.measurement_id = m.id) as evidence_rows
@@ -333,16 +414,17 @@ def _stored_findings(conn, pid: str, df: date, dt: date) -> dict[str, Any]:
         join prompts p on p.id = m.prompt_id join intents i on i.id = p.intent_id and i.property_id = %s
         join engines e on e.id = m.engine_id
         where (m.measured_at at time zone 'Australia/Sydney')::date between %s and %s
-        order by d.created_at desc""", (pid, df, dt)).fetchall()
-    recs = conn.execute("""
-        select r.id, r.title, r.detail, r.action_type, r.priority, r.expected_impact, r.status, r.generated_by,
+        order by d.created_at desc""", (pid, df, dt)), ("""
+        select r.id, r.title, r.detail, r.action_type, r.priority, r.expected_impact, r.status,
+               coalesce((select d.generated_by from diagnoses d where d.id = r.diagnosis_id), 'analyst') as generated_by,
                r.owner, r.due_date, r.diagnosis_id, i.name as intent, e.name as engine, m.measured_at,
                (select count(*) from evidence ev where ev.measurement_id = m.id) as evidence_rows
         from recommendations r join measurements m on m.id = r.measurement_id
         join prompts p on p.id = m.prompt_id join intents i on i.id = p.intent_id and i.property_id = %s
         join engines e on e.id = m.engine_id
         where (m.measured_at at time zone 'Australia/Sydney')::date between %s and %s
-        order by r.created_at desc""", (pid, df, dt)).fetchall()
+        order by r.created_at desc""", (pid, df, dt))])
+    insights = sorted(insights, key=lambda r: -(r["evidence_count"] or 0))
     return {"insights": [dict(r) for r in insights], "diagnoses": [dict(r) for r in diagnoses],
             "recommendations": [dict(r) for r in recs]}
 
@@ -351,32 +433,36 @@ def _report_extras(conn, pid: str, df: date, dt: date) -> dict[str, Any]:
     """Supporting facts for the client report layout, all read from stored records:
     the most-cited web sources in the period, the recorded baseline (benchmarks table) and the
     website work logged as done in Team review (recommendation_outcomes), with its before/after reading."""
-    total = conn.execute("select count(*) as n from v_answer_scores where property_id = %s and day between %s and %s",
-                         (pid, df, dt)).fetchone()["n"] or 0
-    own = conn.execute("select coalesce(own_domains, '{}') as d from properties where id = %s", (pid,)).fetchone()
-    own_domains = [d.lower() for d in (own["d"] if own else [])]
-    rows = conn.execute("""
+    total_rows, own_rows, rows, baseline_rows, outcomes = run_many(conn, [
+        ("select count(*) as n from v_answer_scores where property_id = %s and day between %s and %s", (pid, df, dt)),
+        ("select coalesce(own_domains, '{}') as d from properties where id = %s", (pid,)),
+        ("""
         select lower(e.domain) as domain, count(distinct a.measurement_id) as answers,
                count(distinct a.measurement_id) filter (where a.found_rs) as answers_mentioning
         from evidence e join v_answer_scores a on a.measurement_id = e.measurement_id
         where a.property_id = %s and a.day between %s and %s and e.domain is not null
-        group by 1 order by 2 desc, 1 limit 8""", (pid, df, dt)).fetchall()
+        group by 1 order by 2 desc, 1 limit 8""", (pid, df, dt)),
+        ("""
+        select label, as_of, value from benchmarks
+        where property_id = %s and kind = 'baseline' and prompt_set = 'full' and dimension = 'overall'
+          and metric = 'detection' and (as_of is null or as_of <= %s)
+        order by as_of desc nulls last limit 1""", (pid, dt)),
+        ("""
+        select o.done_on, o.window_days, o.before_answers, o.before_detection, o.after_answers, o.after_detection,
+               o.before_visibility, o.after_visibility, o.note, r.title, r.action_type, i.name as intent
+        from recommendation_outcomes o join recommendations r on r.id = o.recommendation_id
+        left join intents i on i.id = o.intent_id
+        where o.property_id = %s and o.done_on <= %s order by o.done_on, r.title""", (pid, dt)),
+    ])
+    total = total_rows[0]["n"] or 0
+    own = own_rows[0] if own_rows else None
+    own_domains = [d.lower() for d in (own["d"] if own else [])]
+    baseline = baseline_rows[0] if baseline_rows else None
     sources = [{"domain": r["domain"], "answers": r["answers"],
                 "share": round(100.0 * r["answers"] / total, 1) if total else None,
                 "mention_share": round(100.0 * r["answers_mentioning"] / r["answers"], 1) if r["answers"] else None,
                 "own": any(r["domain"] == d or r["domain"].endswith("." + d) for d in own_domains)}
                for r in rows]
-    baseline = conn.execute("""
-        select label, as_of, value from benchmarks
-        where property_id = %s and kind = 'baseline' and prompt_set = 'full' and dimension = 'overall'
-          and metric = 'detection' and (as_of is null or as_of <= %s)
-        order by as_of desc nulls last limit 1""", (pid, dt)).fetchone()
-    outcomes = conn.execute("""
-        select o.done_on, o.window_days, o.before_answers, o.before_detection, o.after_answers, o.after_detection,
-               o.before_visibility, o.after_visibility, o.note, r.title, r.action_type, i.name as intent
-        from recommendation_outcomes o join recommendations r on r.id = o.recommendation_id
-        left join intents i on i.id = o.intent_id
-        where o.property_id = %s and o.done_on <= %s order by o.done_on, r.title""", (pid, dt)).fetchall()
     work = []
     for o in outcomes:
         item = {k: (v.isoformat() if isinstance(v, date) else _num_or(v)) for k, v in dict(o).items()}
@@ -435,20 +521,26 @@ def _range_comparison(conn, pid: str, start: date, end: date, cur_cov: dict[str,
     prev_to = start - timedelta(days=1)
     prev_from = prev_to - timedelta(days=days - 1)
     label = f"{prev_from.strftime('%-d %b %Y')} – {prev_to.strftime('%-d %b %Y')}"
-    previous = _overall(conn, pid, prev_from, prev_to)
+    batch = _Batch()
+    prev_q, cur_q = batch.overall(pid, prev_from, prev_to), batch.overall(pid, start, end)
+    prev_cov_q = batch.add("select min(day) as f, max(day) as l, count(distinct day) as n from v_answer_scores "
+                           "where property_id = %s and day between %s and %s", (pid, prev_from, prev_to))
+    groups = [batch.group(pid, dim, a, b) for dim in ("intent", "engine")
+              for a, b in ((start, end), (prev_from, prev_to))]
+    out = batch.run(conn)
+    previous = _overall_from(*(out[i] for i in prev_q))
     if not previous.get("answers"):
         return {"available": False, "previous_month": None, "previous_label": label,
                 "reason": f"No measurements exist for the preceding period ({label}), so there is nothing to compare against."}
-    current = _overall(conn, pid, start, end)
-    prev_cov = conn.execute("select min(day) as f, max(day) as l, count(distinct day) as n from v_answer_scores "
-                            "where property_id = %s and day between %s and %s", (pid, prev_from, prev_to)).fetchone()
+    current = _overall_from(*(out[i] for i in cur_q))
+    prev_cov = out[prev_cov_q][0]
     partial = cur_cov["partial"] or coverage(prev_from, prev_to, prev_cov["f"], prev_cov["l"], prev_cov["n"])["partial"]
     result = {"available": True, "previous_month": None, "previous_label": label, "basis": "equal_length_period",
               "window": f"{days} days vs the {days} days before",
               "current_answers": current.get("answers"), "previous_answers": previous.get("answers"),
               "metrics": _deltas(current, previous),
-              "intents": _changes(_group(conn, pid, "intent", start, end), _group(conn, pid, "intent", prev_from, prev_to)),
-              "engines": _changes(_group(conn, pid, "engine", start, end), _group(conn, pid, "engine", prev_from, prev_to))}
+              "intents": _changes(out[groups[0]], out[groups[1]]),
+              "engines": _changes(out[groups[2]], out[groups[3]])}
     if partial:
         result["caveat"] = "One of the two periods has days without measurements, so the comparison may not be like for like."
     return result
@@ -463,7 +555,7 @@ def period_report(property_id: str, start: date, end: date, month: str | None = 
     if start > end:
         raise ValueError("From date must not be later than To date.")
     with ThreadPoolExecutor(max_workers=2) as pool:
-        prop_f = pool.submit(_run, lambda c: c.execute("select id, name from properties where id = %s", (property_id,)).fetchone())
+        prop_f = pool.submit(_run, lambda c: c.execute("select id, name, short_name from properties where id = %s", (property_id,)).fetchone())
         months_f = pool.submit(list_months, property_id)
         prop, months = prop_f.result(), months_f.result()
     if not prop:
@@ -525,7 +617,8 @@ def period_report(property_id: str, start: date, end: date, month: str | None = 
     li = r["last_import"]
     if month and r["comparison"].get("available"):
         r["comparison"].setdefault("previous_label", by_key[r["comparison"]["previous_month"]]["label"])
-    return {"property": {"id": str(prop["id"]), "name": prop["name"]}, "month": month or month_key(end), "label": label,
+    return {"property": {"id": str(prop["id"]), "name": prop["name"],
+                         "short_name": short_name(prop["name"], prop.get("short_name"))}, "month": month or month_key(end), "label": label,
             "range": {"from": start.isoformat(), "to": end.isoformat(), "custom": month is None},
             "coverage": cov, "metric_definition": METRIC_NOTE, "overall": r["overall"], "engines": r["engines"],
             "intents": r["intents"], "competitors": r["competitors"], "competitor_trend": competitor_trend,
@@ -548,6 +641,8 @@ CACHE_SECONDS = 1800  # measurements only change on import, which clears the cac
 
 
 def clear_cache(property_id: str | None = None) -> None:
+    from . import opportunities
+    opportunities.clear_cache(property_id)
     _TREND_CACHE.clear()
     for key in [k for k in _CACHE if property_id is None or k[0] == property_id]:
         _CACHE.pop(key, None)
@@ -610,4 +705,5 @@ def refresh_intelligence(property_id: str, months: list[str], diagnose: int = 3)
             except Exception as error:  # noqa: BLE001
                 entry["diagnosis_error"] = str(error)
         out["months"][month] = entry
+    clear_cache(property_id)  # the new insights and diagnoses belong in the next report read
     return out

@@ -174,8 +174,6 @@ def load_rows_in_transaction(conn, rows: list[dict], rep: IngestReport,
     before = conn.execute(COUNT_SQL).fetchone()
     conn.execute("select set_config('geo.import_batch', %s, true)", (str(batch_id),))
     conn.execute(sql_file("03_load_rankscale.sql"))
-    if conn.execute("select to_regproc('public.seed_coogee_report') is not null as ok").fetchone()["ok"]:
-        conn.execute("select public.seed_coogee_report()")
     if conn.execute("select to_regproc('public.classify_neutral_prompts') is not null as ok").fetchone()["ok"]:
         conn.execute("select public.classify_neutral_prompts()")
     after = conn.execute(COUNT_SQL).fetchone()

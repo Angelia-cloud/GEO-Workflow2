@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import sheetIcon from "../../assets/google-sheets-icon.png";
 import { GeoSelect } from "./GeoSelect";
+import { readTranscriptFile } from "./transcriptFile";
 
 /*
  * Phase 1 · Prompt — client & goals → kickoff transcript → engines + shared intents →
@@ -117,6 +118,7 @@ export function PromptFlow({ api, client, account, openTranscriptRequest = 0, cr
   const [reading, setReading] = useState(false);
   const [transcriptError, setTranscriptError] = useState("");
   const [transcriptConfirmed, setTranscriptConfirmed] = useState(false);
+  const [creatingRun, setCreatingRun] = useState(false);
   const [sourceStatus, setSourceStatus] = useState("");
   const [dragging, setDragging] = useState(false);
   const readVersion = useRef(0);
@@ -130,6 +132,7 @@ export function PromptFlow({ api, client, account, openTranscriptRequest = 0, cr
   const [run, setRun] = useState(null); // { id, transcriptKey }
   const [items, setItems] = useState([]); // [{ id, intent, audience, prompt? }]
   const [intents, setIntents] = useState({}); // id -> { intent, audience, status, revision }
+  const [promptItems, setPromptItems] = useState([]); // [{ id, intentId }]
   const [intentsLoading, setIntentsLoading] = useState(false);
   const [intentError, setIntentError] = useState("");
   const [activeIntent, setActiveIntent] = useState(null); // { id, intent, audience, error }
@@ -146,6 +149,8 @@ export function PromptFlow({ api, client, account, openTranscriptRequest = 0, cr
 
   // ---- step 5: sheets -------------------------------------------------------------------
   const [sheet, setSheet] = useState(null);
+  const [sheetState, setSheetState] = useState({ busy: false, error: "" });
+  const [previewKey, setPreviewKey] = useState(0);
   const [expanded, setExpanded] = useState(false);
   const [frameNonce, setFrameNonce] = useState(0);
   const [saveMessage, setSaveMessage] = useState("");
@@ -163,11 +168,15 @@ export function PromptFlow({ api, client, account, openTranscriptRequest = 0, cr
   // ---- derived ---------------------------------------------------------------------------
   const selectedEngines = useMemo(() => engines.filter((engine) => selectedEngineIds.includes(engine.id)), [engines, selectedEngineIds]);
   const intentValue = (item) => ({ intent: intents[item.id]?.intent ?? item.intent, audience: intents[item.id]?.audience ?? item.audience });
+  const promptIntentValue = (item) => {
+    const intent = items.find((entry) => entry.id === item.intentId) || item;
+    return intentValue(intent);
+  };
   const promptText = (engineId, item) => prompts[rowKey(engineId, item.id)]?.text ?? item.prompt ?? "";
   const allIntentsReady =
     engineConfirmed && selectedEngineIds.length > 0 && items.length > 0 && items.every((item) => intentValue(item).intent.trim() && intentValue(item).audience.trim());
   const allPromptsReady =
-    allIntentsReady && selectedEngineIds.every((id) => generated.has(id) && items.every((item) => String(promptText(id, item)).trim()));
+    allIntentsReady && promptItems.length > 0 && selectedEngineIds.every((id) => generated.has(id) && promptItems.every((item) => String(promptText(id, item)).trim()));
   const allowed = (target) => {
     if (target === 1) return true;
     if (!briefApproved) return false;
@@ -188,12 +197,12 @@ export function PromptFlow({ api, client, account, openTranscriptRequest = 0, cr
     return typeof value?.confidence === "number" && Number.isFinite(value.confidence) ? value.confidence : null;
   };
   const visiblePrompts = generated.has(promptEngine)
-    ? items.filter((item) => confidenceFilter === "all" || band(confidenceOf(promptEngine, item)) === confidenceFilter)
+    ? promptItems.filter((item) => confidenceFilter === "all" || band(confidenceOf(promptEngine, item)) === confidenceFilter)
     : [];
-  const approvedCount = (engineId) => items.filter((item) => prompts[rowKey(engineId, item.id)]?.status === "Approved").length;
+  const approvedCount = (engineId) => promptItems.filter((item) => prompts[rowKey(engineId, item.id)]?.status === "Approved").length;
   const approvedIntents = items.filter((item) => intents[item.id]?.status === "Approved").length;
   const pendingEngines = selectedEngines.filter((engine) => !generated.has(engine.id));
-  const totalPrompts = selectedEngineIds.length * items.length;
+  const totalPrompts = selectedEngineIds.length * promptItems.length;
   const exportSummary = `${items.length} shared intents · ${totalPrompts} prompts · ${selectedEngines.length} engines · Generated`;
 
   // ---- invalidation ----------------------------------------------------------------------
@@ -211,9 +220,11 @@ export function PromptFlow({ api, client, account, openTranscriptRequest = 0, cr
     setRun(null);
     setItems([]);
     setIntents({});
+    setPromptItems([]);
     setPrompts({});
     setGenerated(new Set());
     setSheet(null);
+    setSheetState({ busy: false, error: "" });
   }, []);
   const invalidateTranscript = useCallback(() => {
     setTranscriptConfirmed(false);
@@ -225,16 +236,22 @@ export function PromptFlow({ api, client, account, openTranscriptRequest = 0, cr
   }, [invalidateTranscript]);
 
   // ---- client selection from the workspace header -----------------------------------------
+  // Every visit starts a fresh Prompt run for the selected client: the brief is pre-filled from the
+  // client record and earlier runs stay available in Prompt import history.
   const appliedClient = useRef(null);
   useEffect(() => {
     if (!client?.id || appliedClient.current === client.id) return;
+    const initialClient = appliedClient.current === null;
     appliedClient.current = client.id;
     setPropertyMode("existing");
     setPropertyName("");
     setMarket(client.targetAudience || "");
     setGoals(client.goals || "");
     setSetupError("");
-    invalidateBrief();
+    if (!initialClient) {
+      invalidateBrief();
+      setStage(1);
+    }
   }, [client, invalidateBrief]);
 
   // keep the workspace informed so the client record keeps the audience and goals
@@ -273,6 +290,7 @@ export function PromptFlow({ api, client, account, openTranscriptRequest = 0, cr
           : byId(`wizardStage${target}`)?.querySelector("h2")?.focus({ preventScroll: true }),
       );
     }
+
     return true;
   }
 
@@ -319,17 +337,12 @@ export function PromptFlow({ api, client, account, openTranscriptRequest = 0, cr
     setReading(true);
     setTranscriptError("");
     try {
-      if (!/\.(txt|md)$/i.test(file.name)) throw Error("Choose a TXT or Markdown file.");
-      if (file.size > 1024 * 1024) throw Error("Choose a file smaller than 1 MB.");
-      const text = (await file.text()).replace(/^﻿/, "");
+      const text = await readTranscriptFile(file, MAX_TRANSCRIPT);
       if (version !== readVersion.current) return;
-      if (!text.trim()) throw Error("This file is empty. Choose a transcript with text.");
-      if (text.length > MAX_TRANSCRIPT) throw Error("Use 100,000 characters or fewer.");
-      if (text.includes("\u0000")) throw Error("Save your transcript as a UTF-8 text file.");
       setFileName(file.name);
       setFileEdited(false);
       setTranscript(text);
-      setMode("upload");
+      setMode("paste");
       invalidateTranscript();
       sendSource(file, "upload", text);
     } catch (error) {
@@ -349,7 +362,7 @@ export function PromptFlow({ api, client, account, openTranscriptRequest = 0, cr
     invalidateTranscript();
   }
 
-  function submitTranscript(event) {
+  async function submitTranscript(event) {
     event.preventDefault();
     if (!briefApproved) {
       setTranscriptError("Confirm the client and goals in Step 1 first.");
@@ -361,7 +374,13 @@ export function PromptFlow({ api, client, account, openTranscriptRequest = 0, cr
       return;
     }
     if (!transcript.trim()) {
-      setTranscriptError("Upload a .txt or .md file, or paste the kickoff transcript, before continuing.");
+      setTranscriptError("Upload a TXT, Markdown, DOCX or PDF file, or paste the kickoff transcript, before continuing.");
+      setMode("paste");
+      requestAnimationFrame(() => focus("kickoffText"));
+      return;
+    }
+    if (transcript.trim().split(/\s+/).length < 30) {
+      setTranscriptError("The transcript is too short to analyse. Add at least 30 words of kickoff notes.");
       setMode("paste");
       requestAnimationFrame(() => focus("kickoffText"));
       return;
@@ -370,19 +389,43 @@ export function PromptFlow({ api, client, account, openTranscriptRequest = 0, cr
       setTranscriptError("Shorten the transcript to 100,000 characters or fewer.");
       return;
     }
+    setCreatingRun(true);
+    try {
+      let current = run;
+      if (!current) {
+        current = await api.startRun({
+          clientId: client.id,
+          client: client.name,
+          property,
+          targetAudience: market,
+          goals,
+          transcript,
+          transcriptName: fileName || "Pasted transcript",
+          createdBy: account?.name,
+        });
+        setRun(current);
+      }
+    } catch (error) {
+      setTranscriptError(`The transcript could not be saved: ${error.message}`);
+      setCreatingRun(false);
+      return;
+    }
     if (!fileName || fileEdited) {
       sendSource(new File([transcript], "Kickoff-transcript.txt", { type: "text/plain" }), "paste");
     }
     setTranscriptConfirmed(true);
     setTranscriptError("");
     setStage(3);
+    setCreatingRun(false);
     scrollTop();
     requestAnimationFrame(() => focus(engineConfirmed ? "intentStageTitle" : "enginePickerTitle"));
   }
 
   // ---- step 3 handlers -------------------------------------------------------------------
+  const intentsRequest = useRef(false);
   async function ensureIntents() {
-    if (items.length || intentsLoading) return;
+    if (items.length || intentsLoading || intentsRequest.current) return;
+    intentsRequest.current = true;
     setIntentsLoading(true);
     setIntentError("");
     try {
@@ -406,9 +449,15 @@ export function PromptFlow({ api, client, account, openTranscriptRequest = 0, cr
     } catch (error) {
       setIntentError(error.message || "Intents could not be generated. Try again.");
     } finally {
+      intentsRequest.current = false;
       setIntentsLoading(false);
     }
   }
+
+  // Step 3 always has intents to review: generate them whenever the step is open without any.
+  useEffect(() => {
+    if (current === 3 && engineConfirmed && transcriptConfirmed && !items.length && !intentsLoading && !intentError) ensureIntents();
+  }, [current, engineConfirmed, transcriptConfirmed, items.length]); // eslint-disable-line react-hooks/exhaustive-deps
 
   function commitEngines() {
     if (!draftEngineIds.size) {
@@ -455,7 +504,8 @@ export function PromptFlow({ api, client, account, openTranscriptRequest = 0, cr
     });
     if (!approved) ids.forEach((id) => invalidatePrompts(id));
     setIntentError("");
-    if (run) api.saveIntents?.(run.id, ids.map((id) => ({ id, status: approved ? "Approved" : "Generated" })), account?.name).catch(() => {});
+    if (run) api.saveIntents?.(run.id, ids.map((id) => ({ id, status: approved ? "Approved" : "Generated" })), account?.name)
+      .catch((error) => setIntentError(`Intent approval could not be saved: ${error.message}`));
   }
 
   function openIntentReview(id) {
@@ -483,7 +533,8 @@ export function PromptFlow({ api, client, account, openTranscriptRequest = 0, cr
         return { ...all, [item.id]: { ...previous, intent, audience, status: "Edited", revision: (previous.revision || 0) + 1 } };
       });
       invalidatePrompts(item.id);
-      if (run) api.saveIntents?.(run.id, [{ id: item.id, intent, audience, status: "Edited" }], account?.name).catch(() => {});
+      if (run) api.saveIntents?.(run.id, [{ id: item.id, intent, audience, status: "Edited" }], account?.name)
+        .catch((error) => setIntentError(`Intent changes could not be saved: ${error.message}`));
     }
     setActiveIntent(null);
     requestAnimationFrame(() => focus(`intent-edit-shared-${item.id}`));
@@ -501,6 +552,7 @@ export function PromptFlow({ api, client, account, openTranscriptRequest = 0, cr
         engineIds: pending,
         intents: items.map((item) => ({ id: item.id, ...intentValue(item) })),
       });
+      setPromptItems(result.promptItems || []);
       setPrompts((all) => {
         const next = { ...all };
         for (const row of result.prompts) next[rowKey(row.engineId, row.itemId)] = { text: row.text, feedback: "", status: "Generated", confidence: row.confidence ?? null };
@@ -521,7 +573,7 @@ export function PromptFlow({ api, client, account, openTranscriptRequest = 0, cr
     const engineId = promptEngine;
     if (!allowed(4) || !engineConfirmed || !selectedEngineIds.includes(engineId) || !generated.has(engineId)) return;
     for (const id of ids) {
-      const item = items.find((entry) => entry.id === id);
+      const item = promptItems.find((entry) => entry.id === id);
       if (approved && !String(promptText(engineId, item)).trim()) {
         setPromptError("Complete this row before approving.");
         return;
@@ -537,12 +589,13 @@ export function PromptFlow({ api, client, account, openTranscriptRequest = 0, cr
       return next;
     });
     setPromptError("");
-    api.savePrompts?.(run.id, ids.map((id) => ({ engineId, itemId: id, status: approved ? "Approved" : "Generated" })), account?.name).catch(() => {});
+    api.savePrompts?.(run.id, ids.map((id) => ({ engineId, itemId: id, status: approved ? "Approved" : "Generated" })), account?.name)
+      .catch((error) => setPromptError(`Prompt approval could not be saved: ${error.message}`));
   }
 
   function openPromptReview(id) {
     if (!allowed(4) || !generated.has(promptEngine)) return;
-    const item = items.find((entry) => entry.id === id);
+    const item = promptItems.find((entry) => entry.id === id);
     if (!item) return;
     const saved = prompts[rowKey(promptEngine, id)];
     setActivePrompt({
@@ -582,7 +635,7 @@ export function PromptFlow({ api, client, account, openTranscriptRequest = 0, cr
         itemId: activePrompt.item.id,
         text,
         feedback,
-        intent: intentValue(activePrompt.item),
+        intent: promptIntentValue(activePrompt.item),
       });
       setActivePrompt((currentPrompt) => ({
         ...currentPrompt,
@@ -624,7 +677,8 @@ export function PromptFlow({ api, client, account, openTranscriptRequest = 0, cr
         [key]: { ...prior, text, feedback, status: "Edited", confidence, revision: (prior?.revision || 0) + 1 },
       }));
       if (feedback) feedbackLog.current.push({ engineId, itemId: item.id, revision: (prior?.revision || 0) + 1, outcome: accepted ? "accepted" : "edited", feedback });
-      api.savePrompts?.(run.id, [{ engineId, itemId: item.id, text, feedback, status: "Edited", confidence }], account?.name).catch(() => {});
+      api.savePrompts?.(run.id, [{ engineId, itemId: item.id, text, feedback, status: "Edited", confidence }], account?.name)
+        .catch((error) => setPromptError(`Prompt changes could not be saved: ${error.message}`));
     }
     setActivePrompt(null);
     requestAnimationFrame(() => focus(`prompt-edit-${engineId}-${item.id}`));
@@ -656,18 +710,6 @@ export function PromptFlow({ api, client, account, openTranscriptRequest = 0, cr
 
   // ---- step 5 ---------------------------------------------------------------------------
   useEffect(() => {
-    if (current !== 5 || !run || sheet?.runKey === run.id) return;
-    let live = true;
-    api
-      .prepareSheet(run.id, { engineIds: selectedEngineIds })
-      .then((result) => live && setSheet({ ...result, runKey: run.id }))
-      .catch((error) => live && setSheet({ runKey: run.id, error: error.message }));
-    return () => {
-      live = false;
-    };
-  }, [current, run, sheet, api, selectedEngineIds]);
-
-  useEffect(() => {
     if (!expanded) return undefined;
     const onKey = (event) => event.key === "Escape" && setExpanded(false);
     const doc = rootRef.current.ownerDocument;
@@ -679,7 +721,7 @@ export function PromptFlow({ api, client, account, openTranscriptRequest = 0, cr
   const sheetUrl = sheet?.engines?.[firstEngine?.id] || firstEngine?.sheetUrl || sheet?.sheetUrl || "";
   const previewUrl = (() => {
     try {
-      const url = new URL(sheetUrl);
+      const url = new URL(sheet?.sheetUrl || "");
       if (url.origin !== "https://docs.google.com") return "";
       const gid = new URLSearchParams(url.hash.slice(1)).get("gid");
       url.pathname = url.pathname.replace(/\/edit\/?$/, "/preview");
@@ -692,6 +734,28 @@ export function PromptFlow({ api, client, account, openTranscriptRequest = 0, cr
     }
   })();
 
+  const promptSignature = JSON.stringify(
+    selectedEngines.map((engine) => promptItems.map((item) => [promptText(engine.id, item), prompts[rowKey(engine.id, item.id)]?.status])),
+  );
+  const exportKey = current === 5 && run?.id ? `${run.id}|${selectedEngineIds.join(",")}|${promptSignature}` : "";
+  useEffect(() => {
+    if (!exportKey) return undefined;
+    let live = true;
+    setSheetState({ busy: true, error: "" });
+    api
+      .prepareSheet(run.id, { engineIds: selectedEngineIds })
+      .then((result) => {
+        if (!live) return;
+        setSheet(result);
+        setSheetState({ busy: false, error: "" });
+      })
+      .catch((error) => live && setSheetState({ busy: false, error: error.message || "The prompts could not be sent to Google Sheets." }));
+    return () => {
+      live = false;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [exportKey]);
+
   async function savePhaseOne() {
     if (!account?.name || current !== 5 || !allowed(5) || saving) return;
     if (!clientTeam || !property) return;
@@ -702,9 +766,9 @@ export function PromptFlow({ api, client, account, openTranscriptRequest = 0, cr
         return { id: item.id, ...intentValue(item), status: contentStatus(value), ...(value.status === "Approved" ? { reviewer: account.name } : {}) };
       });
       const promptRows = selectedEngines.flatMap((engine) =>
-        items.map((item) => {
+        promptItems.map((item) => {
           const value = prompts[rowKey(engine.id, item.id)] || {};
-          const intent = intentValue(item);
+          const intent = promptIntentValue(item);
           return {
             text: value.text ?? item.prompt,
             feedback: value.feedback || "",
@@ -757,6 +821,7 @@ export function PromptFlow({ api, client, account, openTranscriptRequest = 0, cr
   const intentApproveDisabled = !allowed(3) || !engineConfirmed || !visibleIntentCount || approvedIntents === visibleIntentCount;
   const promptApprovedVisible = visiblePrompts.filter((item) => prompts[rowKey(promptEngine, item.id)]?.status === "Approved").length;
   const promptApproveDisabled = !allowed(4) || !engineConfirmed || !visiblePrompts.length || promptApprovedVisible === visiblePrompts.length;
+  const transcriptParts = Math.max(1, Math.ceil(transcript.trim().length / (agentInfo.transcriptChunkChars || 14000)));
   const confidenceTitle = agentInfo.mode === "ai" ? "QA agent score" : "Rule-based score · no AI key configured";
   const propertyOptions = [
     ...(hasClient ? [{ value: "existing", label: client.property || client.name, detail: client.detail || client.property || client.name }] : []),
@@ -934,10 +999,28 @@ export function PromptFlow({ api, client, account, openTranscriptRequest = 0, cr
                 </div>
                 <form id="transcriptForm" noValidate onSubmit={submitTranscript}>
                   <div className="input-methods" role="group" aria-label="Transcript input method">
-                    <button type="button" id="transcriptUploadTab" data-transcript-mode="upload" aria-pressed={String(mode === "upload")} onClick={() => setMode("upload")}>
+                    <button
+                      type="button"
+                      id="transcriptUploadTab"
+                      data-transcript-mode="upload"
+                      aria-pressed={String(mode === "upload")}
+                      onClick={() => {
+                        setMode("upload");
+                        setTranscriptError("");
+                      }}
+                    >
                       Import file
                     </button>
-                    <button type="button" id="transcriptPasteTab" data-transcript-mode="paste" aria-pressed={String(mode === "paste")} onClick={() => setMode("paste")}>
+                    <button
+                      type="button"
+                      id="transcriptPasteTab"
+                      data-transcript-mode="paste"
+                      aria-pressed={String(mode === "paste")}
+                      onClick={() => {
+                        setMode("paste");
+                        setTranscriptError("");
+                      }}
+                    >
                       Paste text
                     </button>
                   </div>
@@ -969,13 +1052,13 @@ export function PromptFlow({ api, client, account, openTranscriptRequest = 0, cr
                       </div>
                       <div className="upload-content">
                         <h3>Drop your transcript here</h3>
-                        <span className="upload-limits">TXT or Markdown · up to 1 MB · one transcript</span>
+                        <span className="upload-limits">TXT, Markdown, DOCX or PDF · up to 1 MB · one transcript</span>
                         <label className="file-choice prompt-import-button">
                           Import transcript
                           <input
                             id="kickoffFile"
                             type="file"
-                            accept=".txt,.md,text/plain,text/markdown"
+                            accept=".txt,.md,.docx,.pdf,text/plain,text/markdown,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/pdf"
                             aria-label="Import transcript file"
                             onChange={(event) => {
                               const file = event.target.files[0];
@@ -1023,7 +1106,6 @@ export function PromptFlow({ api, client, account, openTranscriptRequest = 0, cr
                           readVersion.current++;
                           setReading(false);
                           setFileEdited(Boolean(fileName));
-                          setSampleTranscript(false);
                           setTranscriptError("");
                           setTranscript(event.target.value);
                           invalidateTranscript();
@@ -1047,8 +1129,8 @@ export function PromptFlow({ api, client, account, openTranscriptRequest = 0, cr
                     <button className="button secondary" type="button" data-wizard-back="1" onClick={() => goStage(1)}>
                       ← Back
                     </button>
-                    <button className="button primary" id="continueTranscript" type="submit" disabled={reading || !transcript.trim()}>
-                      Next <span aria-hidden="true">→</span>
+                    <button className="button primary" id="continueTranscript" type="submit" disabled={reading || creatingRun || !transcript.trim()}>
+                      {creatingRun ? "Saving…" : "Next"} {!creatingRun && <span aria-hidden="true">→</span>}
                     </button>
                   </div>
                 </form>
@@ -1066,7 +1148,7 @@ export function PromptFlow({ api, client, account, openTranscriptRequest = 0, cr
               <div className="phase-one-note">
                 <div>
                   <strong>Edit when needed</strong>
-                  <p>You can adjust the wording before continuing. Generated prompts are ready to export.</p>
+                  <p>You can adjust the wording before continuing. Approved intents are used to write the prompts.</p>
                 </div>
               </div>
               <div className="panel engine-selection-panel" id="engineSelectionPanel" hidden={engineConfirmed}>
@@ -1202,8 +1284,20 @@ export function PromptFlow({ api, client, account, openTranscriptRequest = 0, cr
                         <tbody id="intentRows">
                           {engineConfirmed && intentsLoading && (
                             <tr>
+                              <td className="filter-empty" colSpan="5" role="status">
+                                {transcriptParts > 1
+                                  ? `The intent agent is reading the transcript in ${transcriptParts} parts. Long transcripts can take a few minutes…`
+                                  : "The intent agent is reading the transcript and brief…"}
+                              </td>
+                            </tr>
+                          )}
+                          {engineConfirmed && !intentsLoading && !items.length && !intentError && (
+                            <tr>
                               <td className="filter-empty" colSpan="5">
-                                The intent agent is reading the transcript and brief…
+                                No intents yet.{" "}
+                                <button className="button secondary" type="button" onClick={ensureIntents}>
+                                  Generate intents
+                                </button>
                               </td>
                             </tr>
                           )}
@@ -1318,7 +1412,7 @@ export function PromptFlow({ api, client, account, openTranscriptRequest = 0, cr
                       onClick={() => selectPromptEngine(engine.id, true)}
                     >
                       <strong>{engine.name}</strong>
-                      <span>{generated.has(engine.id) ? String(items.length) : "—"}</span>
+                      <span>{generated.has(engine.id) ? String(promptItems.length) : "—"}</span>
                     </button>
                   ))}
                 </div>
@@ -1390,10 +1484,10 @@ export function PromptFlow({ api, client, account, openTranscriptRequest = 0, cr
                         </div>
                         <div className="prompt-review-counts">
                           <span id="promptFilterCount" role="status">
-                            {visiblePrompts.length} of {items.length} shown
+                            {visiblePrompts.length} of {promptItems.length} shown
                           </span>
                           <span id="promptEngineProgress" role="status">
-                            {promptGenerated ? `${items.length} prompts ready` : "Ready to generate"}
+                            {promptGenerated ? `${promptItems.length} prompts ready` : "Ready to generate"}
                           </span>
                         </div>
                       </div>
@@ -1425,8 +1519,8 @@ export function PromptFlow({ api, client, account, openTranscriptRequest = 0, cr
                           {promptGenerated &&
                             (visiblePrompts.length ? (
                               visiblePrompts.map((item) => {
-                                const index = items.indexOf(item);
-                                const value = intentValue(item);
+                                const index = promptItems.indexOf(item);
+                                const value = promptIntentValue(item);
                                 const engine = engines.find((entry) => entry.id === promptEngine);
                                 const approved = prompts[rowKey(promptEngine, item.id)]?.status === "Approved";
                                 return (
@@ -1492,7 +1586,7 @@ export function PromptFlow({ api, client, account, openTranscriptRequest = 0, cr
                     <span id="promptReviewTotal">{totalPrompts}</span> approved
                   </span>
                   <span id="promptEnginesComplete">
-                    {selectedEngines.filter((engine) => approvedCount(engine.id) === items.length).length} / {selectedEngines.length} engines complete
+                    {selectedEngines.filter((engine) => approvedCount(engine.id) === promptItems.length).length} / {selectedEngines.length} engines complete
                   </span>
                 </div>
               </div>
@@ -1524,31 +1618,26 @@ export function PromptFlow({ api, client, account, openTranscriptRequest = 0, cr
 
             {/* ---- Step 5 ---- */}
             <section className={`wizard-stage${expanded ? " is-expanded" : ""}`} id="wizardStage5" data-wizard-stage="5" aria-labelledby="exportStageTitle" hidden={current !== 5}>
-              <div className="panel export-intro">
-                <div className="eyebrow">Step 05 / Google Sheets</div>
+              <div className="export-intro-inline">
                 <h2 id="exportStageTitle" tabIndex="-1">
                   Google Sheets
                 </h2>
                 <p id="exportReviewSummary">{exportSummary}</p>
-                <div className="wizard-context">
-                  <div>
-                    <span>Client</span>
-                    <strong id="exportClient">{clientTeam || "—"}</strong>
-                  </div>
-                  <div>
-                    <span>Property</span>
-                    <strong id="exportProperty">{property || "—"}</strong>
-                  </div>
-                </div>
               </div>
               <div className="panel export-panel section-gap" id="exportPanel">
                 <div className="workbook-preview-heading">
                   <div className="file-heading">
                     <img className="workbook-sheet-icon" src={sheetIcon} alt="" />
-                    <h2 id="workbookPreviewTitle">{sheet?.title || "Komosion GEO — Engine Intent & Prompt Review"}</h2>
+                    <h2 id="workbookPreviewTitle">Komosion GEO — Engine Intent &amp; Prompt Review</h2>
                   </div>
                   <div className="workbook-heading-actions">
-                    <button className="button secondary" id="reloadWorkbookPreview" type="button" onClick={() => setFrameNonce((value) => value + 1)}>
+                    <button
+                      className="button secondary"
+                      id="reloadWorkbookPreview"
+                      type="button"
+                      disabled={!previewUrl}
+                      onClick={() => setPreviewKey((n) => n + 1)}
+                    >
                       Reload preview
                     </button>
                     <button
@@ -1563,29 +1652,41 @@ export function PromptFlow({ api, client, account, openTranscriptRequest = 0, cr
                     >
                       {expanded ? "Exit full screen" : "Full screen"}
                     </button>
-                    <a className="button primary" id="openGoogleSheet" href={sheetUrl || undefined} target="_blank" rel="noopener">
-                      Open Google Sheets <span aria-hidden="true">↗</span>
-                    </a>
+                    {sheet?.sheetUrl ? (
+                      <a className="button primary" id="openGoogleSheets" href={sheet.sheetUrl} target="_blank" rel="noopener noreferrer">
+                        Open Google Sheets <span aria-hidden="true">↗</span>
+                      </a>
+                    ) : (
+                      <button className="button primary" id="openGoogleSheets" type="button" disabled>
+                        Open Google Sheets <span aria-hidden="true">↗</span>
+                      </button>
+                    )}
                   </div>
                 </div>
-                <p className="workbook-access-note" id="workbookPreviewNote">
-                  {sheet?.synced
-                    ? "Requires access to this Google Sheet. If asked to sign in, use Open Google Sheets, then Reload preview. Your reviewed prompts were written to the workbook."
-                    : sheet?.error
-                      ? `The workbook could not be prepared: ${sheet.error}`
-                      : "Requires access to this Google Sheet. If asked to sign in, use Open Google Sheets, then Reload preview. Prompt edits are saved with the client and exported as CSV."}
-                </p>
                 <div className="workbook-embed">
-                  {current === 5 && previewUrl && (
-                    <iframe
-                      key={frameNonce}
-                      id="googleSheetPreview"
-                      title={`Google Sheets workbook preview${firstEngine ? ` — ${firstEngine.name}` : ""}`}
-                      referrerPolicy="strict-origin-when-cross-origin"
-                      aria-describedby="workbookPreviewNote"
-                      allowFullScreen
-                      src={previewUrl}
-                    />
+                  {current === 5 && previewUrl ? (
+                    <>
+                      <iframe
+                        key={previewKey}
+                        id="googleSheetPreview"
+                        title="Google Sheets workbook preview"
+                        src={previewUrl}
+                        referrerPolicy="strict-origin-when-cross-origin"
+                        allowFullScreen
+                      />
+                    </>
+                  ) : (
+                    current === 5 && (
+                      <div className="workbook-preview-empty" id="workbookPreviewEmpty">
+                        <img className="workbook-sheet-icon" src={sheetIcon} alt="" />
+                        <h3>{sheetState.busy ? "Sending prompts to Google Sheets…" : sheetState.error ? "Google Sheets export failed" : "No spreadsheet exported yet"}</h3>
+                        <p>
+                          {sheetState.busy
+                            ? "Your approved prompts are being written to a spreadsheet."
+                            : sheetState.error || "Approve prompts to create the Google Sheets link. CSV exports remain available."}
+                        </p>
+                      </div>
+                    )
                   )}
                 </div>
               </div>
@@ -1659,7 +1760,7 @@ export function PromptFlow({ api, client, account, openTranscriptRequest = 0, cr
           </div>
           <div className="dialog-body">
             <div className="dialog-meta" id="reviewMeta">
-              {activePrompt ? `${engines.find((engine) => engine.id === activePrompt.engineId)?.name} · ${activePrompt.item.id} · ${intentValue(activePrompt.item).audience}` : ""}
+              {activePrompt ? `${engines.find((engine) => engine.id === activePrompt.engineId)?.name} · ${activePrompt.item.id} · ${promptIntentValue(activePrompt.item).audience}` : ""}
             </div>
             <label className="field">
               Prompt wording

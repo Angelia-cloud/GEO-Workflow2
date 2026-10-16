@@ -4,42 +4,9 @@
 -- =====================================================================
 
 -- ---------------------------------------------------------------------
--- 0. The property and every name that counts as "us".
---    Anything not in aliases or ignored_names is treated as a competitor.
+-- 0. Each client's own names (properties.aliases), ignored names and comparison set are client data,
+--    edited in Settings → Report setup (db/16_client_report_setup.sql). Nothing here resets them.
 -- ---------------------------------------------------------------------
-insert into public.properties (name, brand_group, location, website_url, aliases, ignored_names)
-values (
-  'InterContinental Sydney Coogee Beach', 'IHG', 'Coogee, Sydney NSW',
-  'https://coogeebeach.intercontinental.com',
-  array[
-    -- 1. Confirmed by supervisor (24 Sep 2026): names in AI answers that mean this hotel
-    'InterContinental Sydney Coogee Beach','InterContinental Coogee Beach',
-    'InterContinental Sydney Coogee Beach by IHG','InterContinental Coogee',
-    'Intercontinental Sydney Coogee Beach',
-    'InterContinental Sydney Coogee Beach - Shutters Restaurant & Bar',
-    'Shutters Restaurant & Bar','Shutters Restaurant and Bar','Shutters Restaurant',
-    'Shutters','Shutters Coogee','Shutters Coogee Beach',
-    'Rick Stein at Coogee Beach','Rick Stein at Coogee','Rick Stein','Rick Stein''s',
-    'Rick Stein''s Coogee Beach',
-    'Èliva Spa','Èliva Spa & Wellness','Èliva','Eliva Spa','Èliva Wellness',
-    'Eliva Spa & Wellness','Èliva Coogee Beach','Èliva Spa - InterContinental Coogee Beach',
-    'Èliva Spa Coogee Beach',
-    'Crowne Plaza Sydney Coogee Beach','Crowne Plaza Coogee Beach','Crowne Plaza Coogee',
-    -- 2. Also in Rankscale → Brand Settings (a trailing * means "starts with")
-    'InterContinental Sydney Coogee Beach*',
-    'InterContinental Sydney Coogee',
-    'Shutters at InterContinental Sydney Coogee Beach',
-    'Rick Stein at InterContinental Sydney Coogee Beach',
-    'Rick Stein''s at InterContinental Sydney Coogee Beach'
-  ],
-  -- neither us nor a competitor: skipped when loading mentions and competitors
-  array['Club InterContinental'])
-on conflict (name) do update
-  set aliases = excluded.aliases, ignored_names = excluded.ignored_names;
-
-update public.properties
-   set own_domains = array['coogeebeach.intercontinental.com','ihg.com','ihgplc.com']
- where name = 'InterContinental Sydney Coogee Beach' and own_domains = '{}';
 
 -- helper: is this brand name one of the property's own names?
 -- Case-insensitive; an alias ending in * matches any name that starts with it.
@@ -152,13 +119,33 @@ on conflict (intent_id, prompt_text) do update
 --    Reviewed imports resolve prompt/engine UUIDs directly; legacy imports
 --    continue to use the original property/topic/query/engine-code joins.
 -- ---------------------------------------------------------------------
+-- Resolve every staging row's prompt and engine once. Reviewed imports carry the UUIDs; legacy
+-- imports look them up by property/topic/query and engine code (unique keys, so at most one match).
+drop table if exists pg_temp.stg_resolved;
+create temp table stg_resolved as
+select s.*,
+       coalesce(s.mapped_prompt_id,
+                (select pr.id from public.prompts pr
+                 join public.intents i on i.id = pr.intent_id
+                 where i.property_id = s.property_id and i.name = trim(s.topic_name)
+                   and pr.prompt_text = trim(s.query)
+                 limit 1)) as r_prompt_id,
+       coalesce(s.mapped_engine_id,
+                (select e.id from public.engines e where e.rankscale_code = s.ai_engine limit 1)) as r_engine_id
+from public.stg_rankscale_matched s;
+delete from pg_temp.stg_resolved r
+where r.r_prompt_id is null or r.r_engine_id is null
+   or not exists (select 1 from public.prompts pr where pr.id = r.r_prompt_id)
+   or not exists (select 1 from public.engines e where e.id = r.r_engine_id);
+analyze pg_temp.stg_resolved;
+
 insert into public.measurements (
   prompt_id, engine_id, engine_model, measured_at, brand_found,
   own_brand_rank, own_brand_name_mentioned, own_brand_sentiment, own_brand_sentiment_reason,
   brands_total, visibility_score_latest, visibility_score_24h, visibility_score_7d, visibility_score_30d,
   used_web_search, ai_overview_present, web_search_queries, response_text, source, import_batch)
-select distinct on (pr.id, e.id, s."timestamp"::timestamptz)
-  pr.id, e.id, nullif(s.chatgpt_model, ''), s."timestamp"::timestamptz,
+select distinct on (s.r_prompt_id, s.r_engine_id, s."timestamp"::timestamptz)
+  s.r_prompt_id, s.r_engine_id, nullif(s.chatgpt_model, ''), s."timestamp"::timestamptz,
   coalesce(nullif(s.brand_found, '')::boolean, false),
   nullif(s.brand_rank, '')::int, nullif(s.brand_name_mentioned, ''),
   nullif(s.sentiment, '')::numeric, nullif(s.sentiment_reason, ''),
@@ -169,20 +156,11 @@ select distinct on (pr.id, e.id, s."timestamp"::timestamptz)
   nullif(s.web_search_queries, ''), nullif(s.result_text, ''),
   'rankscale',
   coalesce(nullif(current_setting('geo.import_batch', true), ''), 'rankscale:' || to_char(now(), 'YYYY-MM-DD'))
-from public.stg_rankscale_matched s
-join public.prompts pr on
-  (s.mapped_prompt_id is not null and pr.id = s.mapped_prompt_id)
-  or (s.mapped_prompt_id is null and exists (
-        select 1 from public.intents i
-        where i.property_id = s.property_id and i.id = pr.intent_id and i.name = trim(s.topic_name)
-          and pr.prompt_text = trim(s.query)))
-join public.engines e on
-  (s.mapped_engine_id is not null and e.id = s.mapped_engine_id)
-  or (s.mapped_engine_id is null and e.rankscale_code = s.ai_engine)
-order by pr.id, e.id, s."timestamp"::timestamptz, nullif(s.brand_rank, '')::int nulls last
+from pg_temp.stg_resolved s
+order by s.r_prompt_id, s.r_engine_id, s."timestamp"::timestamptz, nullif(s.brand_rank, '')::int nulls last
 on conflict (prompt_id, engine_id, measured_at) do nothing;
 
--- view: each staging row with its measurement id (used by the steps below)
+-- view: each staging row with its measurement id (kept for manual use in the SQL editor)
 drop view if exists public.stg_rankscale_measured;
 create or replace view public.stg_rankscale_measured as
 select s.*, m.id as measurement_id, m.measured_at
@@ -199,22 +177,45 @@ join public.engines e on
 join public.measurements m on m.prompt_id = pr.id and m.engine_id = e.id
                           and m.measured_at = s."timestamp"::timestamptz;
 
+-- The same rows, materialised once for the steps below (the view would be re-evaluated by each step).
+drop table if exists pg_temp.stg_measured;
+create temp table stg_measured as
+select s.*, m.id as measurement_id, m.measured_at
+from pg_temp.stg_resolved s
+join public.measurements m on m.prompt_id = s.r_prompt_id and m.engine_id = s.r_engine_id
+                          and m.measured_at = s."timestamp"::timestamptz;
+analyze pg_temp.stg_measured;
+
+-- Every distinct ranked name per property, classified once (own name / ignored name).
+drop table if exists pg_temp.stg_names;
+create temp table stg_names as
+select x.property_id, x.name,
+       public.is_own_brand(x.property_id, x.name) as is_own,
+       public.is_ignored_name(x.property_id, x.name) as is_ignored
+from (select distinct s.property_id, trim(v.name) as name
+      from pg_temp.stg_measured s
+      cross join lateral (values (s.rank1_brandname), (s.rank2_brandname), (s.rank3_brandname), (s.rank4_brandname), (s.rank5_brandname), (s.rank6_brandname), (s.rank7_brandname), (s.rank8_brandname), (s.rank9_brandname), (s.rank10_brandname), (s.rank11_brandname), (s.rank12_brandname), (s.rank13_brandname), (s.rank14_brandname), (s.rank15_brandname)) v(name)
+      where nullif(trim(v.name), '') is not null) x;
+create index on pg_temp.stg_names (property_id, name);
+analyze pg_temp.stg_names;
+
 -- ---------------------------------------------------------------------
 -- 4. Competitors: every ranked brand that isn't one of our own names
 -- ---------------------------------------------------------------------
 insert into public.competitors (name)
 select distinct trim(v.name)
-from public.stg_rankscale_measured s
+from pg_temp.stg_measured s
 cross join lateral (values (s.rank1_brandname), (s.rank2_brandname), (s.rank3_brandname), (s.rank4_brandname), (s.rank5_brandname), (s.rank6_brandname), (s.rank7_brandname), (s.rank8_brandname), (s.rank9_brandname), (s.rank10_brandname), (s.rank11_brandname), (s.rank12_brandname), (s.rank13_brandname), (s.rank14_brandname), (s.rank15_brandname)) v(name)
+join pg_temp.stg_names n on n.property_id = s.property_id and n.name = trim(v.name)
 where nullif(trim(v.name), '') is not null
   and nullif(s.mapped_competitor_ids ->> trim(v.name), '') is null
-  and not public.is_own_brand(s.property_id, v.name)
-  and not public.is_ignored_name(s.property_id, v.name)
+  and not n.is_own
+  and not n.is_ignored
 on conflict (name) do nothing;
 
 insert into public.property_relationships (property_id, competitor_id, relationship_type, first_seen_at)
 select s.property_id, c.id, 'observed_competitor', min(s.measured_at)
-from public.stg_rankscale_measured s
+from pg_temp.stg_measured s
 cross join lateral (values (s.rank1_brandname), (s.rank2_brandname), (s.rank3_brandname), (s.rank4_brandname), (s.rank5_brandname), (s.rank6_brandname), (s.rank7_brandname), (s.rank8_brandname), (s.rank9_brandname), (s.rank10_brandname), (s.rank11_brandname), (s.rank12_brandname), (s.rank13_brandname), (s.rank14_brandname), (s.rank15_brandname)) v(name)
 join public.competitors c on c.id = coalesce(
   nullif(s.mapped_competitor_ids ->> trim(v.name), '')::uuid,
@@ -231,11 +232,11 @@ insert into public.measurement_mentions (
   sentiment, sentiment_reason, positive_keywords, neutral_keywords, negative_keywords)
 select distinct on (s.measurement_id, v.rnk)
   s.measurement_id, v.rnk, trim(v.name),
-  public.is_own_brand(s.property_id, v.name),
+  n.is_own,
   c.id,
   nullif(v.sent, '')::numeric, nullif(v.reason, ''),
   public.split_keywords(v.pos), public.split_keywords(v.neu), public.split_keywords(v.neg)
-from public.stg_rankscale_measured s
+from pg_temp.stg_measured s
 cross join lateral (values
         (1, s.rank1_brandname, s.rank1_sentiment, s.rank1_sentiment_reason, s.rank1_positive_keywords, s.rank1_neutral_keywords, s.rank1_negative_keywords),
         (2, s.rank2_brandname, s.rank2_sentiment, s.rank2_sentiment_reason, s.rank2_positive_keywords, s.rank2_neutral_keywords, s.rank2_negative_keywords),
@@ -253,12 +254,13 @@ cross join lateral (values
         (14, s.rank14_brandname, s.rank14_sentiment, s.rank14_sentiment_reason, s.rank14_positive_keywords, s.rank14_neutral_keywords, s.rank14_negative_keywords),
         (15, s.rank15_brandname, s.rank15_sentiment, s.rank15_sentiment_reason, s.rank15_positive_keywords, s.rank15_neutral_keywords, s.rank15_negative_keywords)
      ) v(rnk, name, sent, reason, pos, neu, neg)
+join pg_temp.stg_names n on n.property_id = s.property_id and n.name = trim(v.name)
 left join public.competitors c
   on c.id = coalesce(nullif(s.mapped_competitor_ids ->> trim(v.name), '')::uuid,
                      (select c2.id from public.competitors c2 where c2.name = trim(v.name)))
- and not public.is_own_brand(s.property_id, v.name)
+ and not n.is_own
 where nullif(trim(v.name), '') is not null
-  and not public.is_ignored_name(s.property_id, v.name)
+  and not n.is_ignored
 order by s.measurement_id, v.rnk
 on conflict (measurement_id, rank) do nothing;
 
@@ -300,12 +302,12 @@ with cites as (
   select s.property_id, s.measurement_id, s.measured_at, null::uuid as competitor_id,
          'own_brand' as attributed_to, s.brand_citations as urls, 0.80 as score,
          'Cited by the AI engine and attributed to our property by Rankscale; not manually checked' as basis
-  from public.stg_rankscale_measured s
+  from pg_temp.stg_measured s
   union all
   -- competitor citations (rank1 … rank15)
   select s.property_id, s.measurement_id, s.measured_at, c.id, 'competitor', v.urls, 0.80,
          'Cited by the AI engine and attributed to this competitor by Rankscale; not manually checked'
-  from public.stg_rankscale_measured s
+  from pg_temp.stg_measured s
   cross join lateral (values
         (s.rank1_brandname, s.rank1_citations),
         (s.rank2_brandname, s.rank2_citations),
@@ -330,7 +332,7 @@ with cites as (
   -- everything else the answer cited
   select s.property_id, s.measurement_id, s.measured_at, null, 'unattributed', s.other_citations, 0.50,
          'Cited in the AI answer but not linked to a specific brand by Rankscale'
-  from public.stg_rankscale_measured s
+  from pg_temp.stg_measured s
 )
 insert into public.evidence (
   property_id, measurement_id, competitor_id, evidence_type, attributed_to, url, domain,
@@ -352,6 +354,7 @@ with base as (
   join public.engines e  on e.id = m.engine_id
   join public.prompts pr on pr.id = m.prompt_id
   join public.intents i  on i.id = pr.intent_id
+  where i.property_id in (select distinct property_id from pg_temp.stg_measured)
 ),
 grouped as (
   select property_id, intent_id, intent_name, engine_id, max(engine_name) as engine_name,
@@ -371,6 +374,13 @@ top_comp as (
   join public.measurement_mentions mm on mm.measurement_id = b.id and not mm.is_own_brand
   join public.competitors c on c.id = mm.competitor_id
   group by grouping sets ((b.intent_id, b.engine_id, c.name), (b.intent_id, c.name))
+),
+top3 as (
+  select intent_id, engine_id,
+         jsonb_agg(jsonb_build_object('name', name, 'mentions', n) order by rn) as top_competitors
+  from top_comp
+  where rn <= 3
+  group by intent_id, engine_id
 )
 insert into public.intelligence (property_id, intent_id, engine_id, period_start, period_end,
                                  insight_type, title, summary, metrics, generated_by)
@@ -387,11 +397,12 @@ select g.property_id, g.intent_id, g.engine_id, g.period_start, g.period_end,
          'brand_found_rate', round(g.answers_with_brand::numeric / g.answers, 3),
          'avg_rank_when_found', g.avg_rank_when_found,
          'avg_sentiment_when_found', g.avg_sentiment_when_found,
-         'top_competitors', (select jsonb_agg(jsonb_build_object('name', t.name, 'mentions', t.n) order by t.rn)
-                             from top_comp t
-                             where t.intent_id = g.intent_id and t.engine_id is not distinct from g.engine_id
-                               and t.rn <= 3)),
+         'top_competitors', t3.top_competitors),
        'sql_rollup'
 from grouped g
+left join top3 t3 on t3.intent_id = g.intent_id and t3.engine_id is not distinct from g.engine_id
 on conflict (property_id, intent_id, engine_id, insight_type, period_start, period_end)
 do update set title = excluded.title, summary = excluded.summary, metrics = excluded.metrics;
+
+-- the working tables are per session; drop them so a pooled connection doesn't keep them
+drop table if exists pg_temp.stg_resolved, pg_temp.stg_measured, pg_temp.stg_names;

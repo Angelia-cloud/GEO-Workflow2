@@ -1,4 +1,4 @@
-import { createElement, useEffect, useMemo, useRef, useState } from "react";
+import { createElement, Profiler, useEffect, useMemo, useRef, useState } from "react";
 import { komosionLogo } from "../../assets/index";
 import { loadRankscaleHistory } from "../rankscale/historyStore";
 import { summariseRecords } from "../rankscale/parseRankscale";
@@ -23,6 +23,12 @@ const fmtMetricValue = (A, e) =>
     : `${A === "position" ? "#" : ""}${Number(e).toLocaleString("en-AU", {
         maximumFractionDigits: 2,
       })}${["detection", "top3"].includes(A) ? "%" : ""}`;
+const reportProfiler = (_id, phase, actualDuration) => {
+  console.info("[report-timing] react-render", {
+      phase,
+      durationMs: Number(actualDuration.toFixed(1)),
+  });
+};
 function PerformanceOverview({ report }) {
   return report.performance ? (
     <div className="csr-performance-overview">
@@ -185,6 +191,7 @@ function ClientReport({ client, account, request, onUpload, onPeriodApply, onRep
     [M, h] = useState(0),
     [U, I] = useState(false),
     Q = useRef(null),
+    reportStartedAt = useRef(0),
     p = useMemo(() => (a ? buildReportContext(a) : null), [a]);
   function Y(F) {
     const m = document.getElementById(F);
@@ -197,6 +204,7 @@ function ClientReport({ client, account, request, onUpload, onPeriodApply, onRep
   }
   useEffect(() => {
     let F = true;
+    reportStartedAt.current = performance.now();
     s(true);
     r(null);
     d("");
@@ -212,14 +220,27 @@ function ClientReport({ client, account, request, onUpload, onPeriodApply, onRep
           r(request.record.generatedReport);
           g(request.record.storageMode === "session" ? "Available this session" : "Saved report");
           s(false);
+          console.info("[report-timing] report-total", {
+            durationMs: Number((performance.now() - reportStartedAt.current).toFixed(1)),
+            source: "saved-report",
+          });
           return;
         }
+        const historyStarted = performance.now();
         const j = await loadRankscaleHistory(client.id);
+        console.info("[report-timing] history-fetch", {
+          durationMs: Number((performance.now() - historyStarted).toFixed(1)),
+          rows: j.rows.length,
+        });
         if (!F) {
           return;
         }
         if (!j.rows.length) {
           s(false);
+          console.info("[report-timing] report-total", {
+            durationMs: Number((performance.now() - reportStartedAt.current).toFixed(1)),
+            source: "empty-history",
+          });
           return;
         }
         const w = summariseRecords(j.rows),
@@ -235,18 +256,31 @@ function ClientReport({ client, account, request, onUpload, onPeriodApply, onRep
           s(false);
           return;
         }
+        const calculationStarted = performance.now();
         const C = buildClientReport({
           client: client,
           rows: j.rows,
           period: z,
           createdBy: account?.name,
         });
+        console.info("[report-timing] report-calculation", {
+          durationMs: Number((performance.now() - calculationStarted).toFixed(1)),
+          rows: j.rows.length,
+        });
         if (!F) {
           return;
         }
         r(C);
         s(false);
+        const saveStarted = performance.now();
         const R = await onReportSaved?.(C);
+        console.info("[report-timing] report-save", {
+          durationMs: Number((performance.now() - saveStarted).toFixed(1)),
+        });
+        console.info("[report-timing] report-total", {
+          durationMs: Number((performance.now() - reportStartedAt.current).toFixed(1)),
+          source: "rankscale-history",
+        });
         if (F) {
           g(R?.storageMode === "session" ? "Available this session" : "Saved in Rankscale import history");
         }
@@ -292,6 +326,7 @@ function ClientReport({ client, account, request, onUpload, onPeriodApply, onRep
           to: "",
         };
   return (
+    <Profiler id="rankscale-report" onRender={reportProfiler}>
     <section className="report-hub report-page" aria-label="Report">
       <div className="client-story">
         <header className="coogee-report-heading">
@@ -550,6 +585,7 @@ function ClientReport({ client, account, request, onUpload, onPeriodApply, onRep
         )}
       </div>
     </section>
+    </Profiler>
   );
 }
 export { ClientReport };

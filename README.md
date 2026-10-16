@@ -70,6 +70,8 @@ In the Supabase SQL Editor (or `psql`), run in order:
 | `db/13_monthly_imports.sql` | Monthly import provenance (source file, upload time, status) |
 | `db/14_commercial_validation.sql` | Client-confirmed business priorities per intent and saved opportunity assessments |
 | `db/12_data_provenance.sql` | Flags synthetic import batches and excludes them from `v_measurements_flat` (rows are kept). See `docs/data_reconciliation_sept_2026.md` |
+| `db/15_report_performance.sql` | **New.** Faster `v_answer_scores` (same columns and values) and two indexes. Run it on an existing database too: report queries no longer scan every client's mentions |
+| `db/16_client_report_setup.sql` | **New.** Per-client report setup (see *Adding a hotel*). Moves Coogee's names, comparison hotels, named-question words and baseline out of the loader into Coogee's own data — written once, never overwritten by an upload. A question that contains any of a client's own names now counts as naming the hotel |
 
 `db/03_load_rankscale.sql` is run by the app on every upload. `04_coogee_example.sql` and `05_verify.sql` are optional checks.
 
@@ -96,10 +98,13 @@ Frontend development with hot reload: keep uvicorn on port 8000 and run `npm run
 | Variable | Purpose |
 |---|---|
 | `DATABASE_URL` | Supabase → Connect → Session pooler URI (port 5432) |
-| `GEO_LLM_PROVIDER`, `GEO_LLM_MODEL`, `GROQ_API_KEY` (or `ANTHROPIC_API_KEY` / `OPENAI_API_KEY`) | Turns on AI mode for the agents. Without a key every agent runs its rule-based version and the UI says so |
-| `GEO_PROMPT_SHEET_URL` | The team's prompt workbook (link shown in Phase 1) |
-| `GEO_PROMPT_SHEET_ID` + `GOOGLE_SERVICE_ACCOUNT_FILE` / `_JSON` | Optional: write approved prompts straight into the sheet (needs `google-auth requests`; share the sheet with the service account) |
+| `GEO_LLM_PROVIDER`, `GEO_LLM_MODEL`, `GROQ_API_KEY` (or `ANTHROPIC_API_KEY` / `OPENAI_API_KEY`) | The agents' model. Phase 1 (intents and prompts) needs `GROQ_API_KEY`; diagnosis and the report assistant fall back to rules without a key |
+| `GOOGLE_SERVICE_ACCOUNT_FILE` or `GOOGLE_SERVICE_ACCOUNT_JSON` | Optional Google Sheets export credentials. Configure one; do not commit service-account keys |
+| `GEO_SHEET_PUBLIC` | Link access for spreadsheets the app creates: `reader` by default, `writer`, or `off` (service account only until separately shared) |
 | `GEO_MAX_UPLOAD_MB` | Upload limit (default 64) |
+| `GEO_LLM_TPM` | Your Groq plan's tokens-per-minute limit (default 8000, the free plan). Long kickoff transcripts are read in parts sized to fit it; raise it on a paid plan for fewer, larger parts. `GEO_TRANSCRIPT_CHUNK_CHARS` sets the part size directly |
+| `GEO_DB_POOL_MAX` | Database connections kept open and reused (default 10; keep it under the Supabase pooler's client limit). `GEO_DB_POOL=0` turns pooling off |
+| `GEO_DB_PIPELINE` | `1` (default) sends a report's independent queries together; `0` sends them one by one |
 | `GEO_ALERT_*`, `GEO_MIN_EVIDENCE_ANSWERS`, `GEO_OUTCOME_WINDOW_DAYS` | Workflow 2 thresholds |
 
 ## How the app works
@@ -109,7 +114,7 @@ Frontend development with hot reload: keep uvicorn on port 8000 and run `npm run
 | Sign in | Team account card | `GET /api/team` |
 | Pick / create a client | Top-bar client picker, **Create new client** | `GET/POST/PATCH /api/clients` |
 | Phase 1 · brief | Client & goals; edits save to the client | `PATCH /api/clients/{id}` |
-| Phase 1 · transcript → intents | Kickoff transcript (upload or paste), **Generate intents** | `POST /api/prompt-setup/runs`, `/runs/{id}/intents` — `agents/prompt_setup` (AI) or rules |
+| Phase 1 · transcript → intents | Kickoff transcript (upload or paste), resume after refresh, **Generate intents** | `POST /api/prompt-setup/runs`, `GET /runs/{id}`, `PATCH /runs/{id}/state`, `/runs/{id}/intents` — `agents/prompt_setup` (AI) or rules |
 | Phase 1 · prompts | Prompts per engine, regenerate one, QA scores | `/runs/{id}/prompts`, `/prompts/regenerate` — Prompt Writer + Prompt QA |
 | Phase 1 · Google Sheets | Save & export, CSV download | `/runs/{id}/sheet`, `/complete`, `/export.csv` — writes approved intents/prompts to the DB |
 | Phase 2 · upload | Import Rankscale file (overlapping exports are de-duplicated); measurements and auto alerts continue after the saved-history response | `POST /api/clients/{id}/rankscale/imports` → history + background measurement load + auto alerts |
@@ -119,6 +124,16 @@ Frontend development with hot reload: keep uvicorn on port 8000 and run `npm run
 | Team review → explanations | Possible explanations for approved findings | `POST /api/review/{id}/diagnoses` — diagnosis agent (AI or rules) |
 | Team review → recommendations | Approve with owner + due date, reject with reason, edit | `/api/recommendations`, outcome logging |
 | Library | Saved transcripts, prompt sheets, uploads, reports | `/api/library` (entries + original files) |
+
+### Google Sheets export setup (optional)
+
+1. In Google Cloud Console, select or create a project and enable **Google Sheets API** and **Google Drive API**.
+2. Create a service account in that project and create/download a JSON key. Store the key outside the repository with restricted file permissions.
+3. Set `GOOGLE_SERVICE_ACCOUNT_FILE` in `backend/.env` to the key's absolute path, or set `GOOGLE_SERVICE_ACCOUNT_JSON` to the complete JSON value. Restart the backend. The Phase 1 Sheets status should report the configured service-account email.
+4. For an existing spreadsheet, share it with that service-account email as **Editor**. The app lists accessible spreadsheets and writes the approved prompts into its `Prompts` tab. The tab is replaced on each export, so repeated exports do not append duplicate rows.
+5. For a spreadsheet created by the app, `GEO_SHEET_PUBLIC=reader` (default) grants anyone with the link read access; `writer` grants edit access. These are public-link permissions, not restricted team permissions. Set `GEO_SHEET_PUBLIC=off` to avoid creating a public link, then separately share the spreadsheet with intended users. The service account must still be able to access it.
+
+If credentials or Google APIs are unavailable, Google export reports an error rather than claiming success. Download the approved-prompt CSV from the Phase 1 exports page as a fallback. CSV export does not require Google credentials.
 
 ### Monthly import workflow
 
@@ -151,7 +166,16 @@ They run against a real database (use a test project or local Postgres): file va
 
 ## Adding a hotel
 
-Use **Create new client** in the app (or insert into `properties`). Uploads are mapped to the client they are made for, so the export's `brand_reference` doesn't need to match. Add every name AI engines use for the hotel to `properties.aliases` so mentions are recognised.
+1. **Create new client** in the client picker. Uploads are mapped to the client they are made for, so the export's `brand_reference` doesn't need to match.
+2. Upload its Rankscale export.
+3. **Settings → Report setup** (with the client selected) — suggestions come from the client's own answers:
+   - **The hotel's names**: the short name used in report sentences, and every name AI answers use for the hotel or its outlets (`*` = starts with). Answers already loaded are updated when you save.
+   - **Questions that name the hotel**: extra words (suburb, venue, landmark). Questions containing these or any of the hotel's names are tracked but left out of the competitor comparison.
+   - **Comparison hotels**: the competitor set and the names AI answers use for each. Without them the report shows no ranking.
+   - **Websites and other names**: the hotel's own domains and names to ignore.
+   - **Baseline**: the starting point the report measures against.
+
+The loader and the reports no longer contain anything specific to one hotel; Coogee's setup is its own data (`db/16_client_report_setup.sql` seeds it once). The older command-line prompt pipeline (`agents/prompt_generation`) still uses Coogee as its example.
 
 ## Docs
 
@@ -163,4 +187,12 @@ Use **Create new client** in the app (or insert into `properties`). Uploads are 
 
 ## Groq free-tier limits
 
-GPT-OSS 20B on the free plan allows 30 requests / 8K tokens per minute and 200K tokens per day — roughly 25 diagnoses a day. The client waits and retries on per-minute limits. Raise `GEO_LLM_REASONING` / `GEO_LLM_MAX_OUTPUT` on a paid plan.
+GPT-OSS on the free plan allows 30 requests / 8K tokens per minute and 200K tokens per day — roughly 25 diagnoses a day. The client waits and retries on per-minute limits. Raise `GEO_LLM_REASONING` / `GEO_LLM_MAX_OUTPUT` on a paid plan.
+
+A kickoff transcript longer than one request allows (about 13,000 characters on the free plan) is read in parts, then the intents found in each part are merged; nothing is cut off. On the free plan each extra part can wait up to a minute for the per-minute limit, so a long transcript takes a few minutes. Set `GEO_LLM_TPM` to your plan's limit to read it in fewer parts.
+
+## Speed
+
+- After an upload the records are saved in a few seconds; the answers are then added to the report tables in the background. The upload page waits for that step (usually under 30 seconds) and opens the report as soon as it is done. Insights, alerts and diagnoses follow in the background, and the latest months' reports are built in advance so they open instantly.
+- Reports are cached in the server's memory until the next upload or priority change. The first view of a month or date range after a restart is computed once (a few seconds against Supabase).
+- Connections to Supabase are pooled and the report's independent queries are sent together, so a far-away database costs one round trip per group of queries instead of one per query.

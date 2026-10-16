@@ -16,7 +16,9 @@ import csv
 import hashlib
 import io
 import json
+import logging
 import re
+import time
 import uuid
 from datetime import datetime, timezone
 from typing import Any
@@ -25,6 +27,8 @@ from psycopg.types.json import Jsonb
 
 from ..db import connect
 from .ingest import decode
+
+logger = logging.getLogger(__name__)
 
 REQUIRED = ["timestamp", "query", "ai_engine", "result_text", "brand_reference"]
 EMPTY = {"", "-", "n/a"}
@@ -246,6 +250,8 @@ def load_history(client_id: str, date_from: str | None = None, date_to: str | No
 
 def store_records(client_id: str, parsed: dict[str, Any], file_name: str, imported_by: str | None,
                   file_size: int | None) -> dict[str, Any]:
+    started = time.perf_counter()
+    copy_seconds = duplicate_seconds = insert_seconds = 0.0
     rows = parsed["rows"]
     if any(row["clientId"] != str(client_id) for row in rows):
         raise ValueError("Rankscale data must belong to the selected client.")
@@ -269,25 +275,30 @@ def store_records(client_id: str, parsed: dict[str, Any], file_name: str, import
         copy_sql = "copy pg_temp.rankscale_import_stage ({}) from stdin".format(
             ", ".join(f'"{column}"' for column in columns)
         )
+        # Ask which answers are already saved first, so a re-upload or overlapping export sends only new rows.
+        duplicate_started = time.perf_counter()
+        incoming_answers = sorted({row["answerId"] for row in rows})
+        known_answers = {
+            row["answer_id"]
+            for row in conn.execute(
+                "select distinct answer_id from public.rankscale_records where client_id = %s and answer_id = any(%s)",
+                (client_id, incoming_answers),
+            ).fetchall()
+        }
+        duplicate_seconds = time.perf_counter() - duplicate_started
+        stage_started = time.perf_counter()
         with conn.cursor().copy(copy_sql) as copy:
             for row in rows:
+                if row["answerId"] in known_answers:
+                    continue
                 copy.write_row((
                     client_id, row["id"], row["answerId"], row["timestamp"], row["date"], row["engine"],
                     row["prompt"], row["answer"], row["brandReference"], row["topic"], row["brandFound"],
                     row["brandNameMentioned"], row["brandRank"], row["sentiment"], Jsonb(row["source"]),
                     Jsonb(row["sourceFields"]), import_id,
                 ))
-        known_answers = {
-            row["answer_id"]
-            for row in conn.execute(
-                """select distinct saved.answer_id
-                   from public.rankscale_records saved
-                   join (select distinct client_id, answer_id from pg_temp.rankscale_import_stage) incoming
-                     on incoming.client_id = saved.client_id and incoming.answer_id = saved.answer_id
-                   where saved.client_id = %s""",
-                (client_id,),
-            ).fetchall()
-        }
+        copy_seconds = time.perf_counter() - stage_started
+        insert_started = time.perf_counter()
         inserted = conn.execute(
             """insert into public.rankscale_records
                    (client_id, id, answer_id, ts, day, engine, prompt, answer, brand_reference, topic, brand_found,
@@ -300,18 +311,25 @@ def store_records(client_id: str, parsed: dict[str, Any], file_name: str, import
                on conflict (client_id, id) do nothing
                returning answer_id"""
         ).fetchall()
+        insert_seconds = time.perf_counter() - insert_started
         added = len(inserted)
         new_answers = {row["answer_id"] for row in inserted} - known_answers
         conn.execute("update rankscale_imports set rows_added = %s, duplicates = %s, answers_added = %s where id = %s",
                      (added, len(rows) - added, len(new_answers), import_id))
         conn.commit()
+    logger.info(
+        "rankscale_import_store rows=%d bytes=%d added=%d duplicates=%d copy_ms=%.1f "
+        "duplicate_lookup_ms=%.1f insert_ms=%.1f total_ms=%.1f",
+        len(rows), file_size or 0, added, len(rows) - added,
+        copy_seconds * 1000, duplicate_seconds * 1000, insert_seconds * 1000,
+        (time.perf_counter() - started) * 1000,
+    )
     return {"importId": import_id, "added": added, "duplicates": len(rows) - added}
 
 
-def _refresh_months(client_id: str, rows: list[dict]) -> dict[str, Any]:
-    """Months (Australia/Sydney) present in the file: recalculate their metrics, findings and recommendations."""
+def _months_of(rows: list[dict]) -> set[str]:
+    """Months (Australia/Sydney) present in the file."""
     from zoneinfo import ZoneInfo
-    from . import monthly
     months: set[str] = set()
     for row in rows:
         stamp = row.get("timestamp")
@@ -321,19 +339,83 @@ def _refresh_months(client_id: str, rows: list[dict]) -> dict[str, Any]:
             if stamp.tzinfo is None:
                 stamp = stamp.replace(tzinfo=timezone.utc)
             months.add(stamp.astimezone(ZoneInfo("Australia/Sydney")).strftime("%Y-%m"))
+    return months
+
+
+def _refresh_months(client_id: str, rows: list[dict]) -> dict[str, Any]:
+    """Months (Australia/Sydney) present in the file: recalculate their metrics, findings and recommendations."""
+    from . import monthly
+    months = _months_of(rows)
     try:
         return monthly.refresh_intelligence(client_id, sorted(months))
     except Exception as error:  # noqa: BLE001 — refresh is a follow-up and never fails the upload
         return {"refresh_error": str(error), "months": sorted(months)}
 
 
-def load_measurements(client_id: str, raw: bytes, file_name: str, imported_by: str | None, import_id: str) -> dict[str, Any]:
+def _save_follow_up(import_id: str, result: dict[str, Any]) -> None:
+    with connect() as conn:
+        conn.execute("update rankscale_imports set follow_up = %s where id = %s",
+                     (Jsonb(json.loads(json.dumps(result, default=str))), import_id))
+        conn.commit()
+
+
+def _prewarm_reports(client_id: str, rows: list[dict]) -> None:
+    """Build the reports for the months in the file (newest first) so opening the report is instant."""
+    from . import monthly
+    from .opportunities import assess
+    try:
+        monthly.clear_cache(client_id)
+        available = {m["month"] for m in monthly.list_months(client_id)}
+        months = sorted({m for m in _months_of(rows) if m in available}, reverse=True)[:3]
+        for month in months:
+            monthly.cached_month_report(client_id, month)
+            start, end = monthly.parse_month(month)
+            assess(client_id, start, end, save=True)
+    except Exception as error:  # noqa: BLE001 — warming is best effort
+        logger.warning("report prewarm failed for %s: %s", client_id, error)
+
+
+def import_status(client_id: str, import_id: str) -> dict[str, Any]:
+    """Progress of the background measurement load for one upload."""
+    try:
+        uuid.UUID(str(client_id))
+    except ValueError as error:
+        raise LookupError("Client not found") from error
+    with connect() as conn:
+        row = conn.execute("select follow_up from rankscale_imports where id = %s and client_id = %s",
+                           (import_id, client_id)).fetchone()
+    if not row:
+        raise LookupError("Import not found")
+    follow_up = row["follow_up"] or {}
+    status = follow_up.get("status") or ("loaded" if follow_up.get("measurements_loaded") else
+                                         "failed" if follow_up.get("reason") else "pending")
+    return {"id": import_id, "status": status, "followUp": follow_up}
+
+
+def _already_loaded(client_id: str) -> bool:
+    with connect() as conn:
+        return bool(conn.execute(
+            "select 1 from rankscale_imports where client_id = %s and follow_up->>'status' = 'loaded' limit 1",
+            (client_id,)).fetchone())
+
+
+def load_measurements(client_id: str, raw: bytes, file_name: str, imported_by: str | None, import_id: str,
+                      rows_added: int | None = None) -> dict[str, Any]:
     """Feed a full Rankscale export into the Workflow 2 tables for this client's property."""
+    if rows_added == 0 and _already_loaded(client_id):
+        # Every row was already saved and measured by an earlier upload: nothing new to load.
+        result = {"measurements_loaded": True, "status": "loaded", "intelligence": "done", "skipped": "no new rows"}
+        _save_follow_up(import_id, result)
+        return result
     from . import loader
     from .followups import after_load
     from .ingest import parse_rankscale
+    started = time.perf_counter()
+    parse_seconds = loader_seconds = followup_seconds = refresh_seconds = 0.0
     try:
+        stage_started = time.perf_counter()
         rows, report = parse_rankscale(raw, file_name)
+        parse_seconds = time.perf_counter() - stage_started
         if not report.ok or not rows:
             result = {"measurements_loaded": False,
                       "reason": (report.errors[0]["message"] if report.errors else "No rows to load")}
@@ -341,6 +423,7 @@ def load_measurements(client_id: str, raw: bytes, file_name: str, imported_by: s
             # Every row belongs to the client the file was uploaded for, whatever its brand_reference says.
             mapped = [{"property_id": str(client_id), "prompt_id": None, "engine_id": None, "competitor_ids": {}}
                       for _ in rows]
+            stage_started = time.perf_counter()
             with connect() as conn:
                 with conn.transaction():
                     conn.execute("set local statement_timeout = 0")
@@ -354,23 +437,47 @@ def load_measurements(client_id: str, raw: bytes, file_name: str, imported_by: s
                         (loaded["batch_id"], report.filename, imported_by, report.rows_in_file, report.rows_valid,
                          report.rows_rejected, added.get("measurements", 0), added.get("mentions", 0),
                          added.get("evidence", 0), json.dumps(report.as_dict(), default=str)))
+            loader_seconds = time.perf_counter() - stage_started
+            stage_started = time.perf_counter()
             result = {"measurements_loaded": True, **{k: v for k, v in loaded.items() if k != "report"},
                       **after_load(str(client_id))}
-            result["monthly"] = _refresh_months(str(client_id), rows)
             result["evidence_added"] = (loaded.get("added") or {}).get("evidence")
+            followup_seconds = time.perf_counter() - stage_started
+            # The measurements are in: the report can open now. Insights, alerts and diagnoses follow.
+            from . import monthly
+            monthly.clear_cache(str(client_id))
+            _save_follow_up(import_id, {**result, "status": "loaded", "intelligence": "running"})
+            stage_started = time.perf_counter()
+            result["monthly"] = _refresh_months(str(client_id), rows)
+            result["intelligence"] = "done"
+            refresh_seconds = time.perf_counter() - stage_started
     except Exception as error:  # noqa: BLE001 — measurements are a follow-up; never fail the upload
         result = {"measurements_loaded": False, "reason": str(error)}
-    with connect() as conn:
-        conn.execute("update rankscale_imports set follow_up = %s where id = %s",
-                     (Jsonb(json.loads(json.dumps(result, default=str))), import_id))
-        conn.commit()
+    result["status"] = "loaded" if result.get("measurements_loaded") else "failed"
+    _save_follow_up(import_id, result)
+    if result.get("measurements_loaded"):
+        _prewarm_reports(str(client_id), rows)
+    logger.info(
+        "rankscale_import_followup rows=%d parse_ms=%.1f measurement_load_ms=%.1f "
+        "after_load_ms=%.1f monthly_refresh_ms=%.1f total_ms=%.1f",
+        len(rows) if "rows" in locals() else 0,
+        parse_seconds * 1000, loader_seconds * 1000, followup_seconds * 1000,
+        refresh_seconds * 1000, (time.perf_counter() - started) * 1000,
+    )
     return result
 
 
 def import_file(client_id: str, raw: bytes, file_name: str, imported_by: str | None) -> dict[str, Any]:
+    started = time.perf_counter()
     imported_at = datetime.now(timezone.utc).isoformat()
     parsed = parse_rankscale_file(raw, client_id, file_name, imported_at)
+    parse_seconds = time.perf_counter() - started
     stored = store_records(client_id, parsed, file_name, imported_by, len(raw))
+    logger.info(
+        "rankscale_import_request rows=%d bytes=%d parse_ms=%.1f total_ms=%.1f",
+        len(parsed["rows"]), len(raw), parse_seconds * 1000,
+        (time.perf_counter() - started) * 1000,
+    )
     latest = {
         "id": stored["importId"],
         "importedAt": imported_at,

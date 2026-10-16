@@ -14,12 +14,15 @@ Rules
 """
 from __future__ import annotations
 
+import copy
 import json
+import threading
+import time
 from datetime import date
 from typing import Any
 
-from ..db import connect
-from .report import competitor_metrics
+from ..db import connect, run_many
+from .report import competitor_metrics, competitor_metrics_query  # noqa: F401
 
 GAP_POINTS = 5.0       # competitor leads by at least this many visibility points to count as a gap
 MIN_NEUTRAL_ANSWERS = 20
@@ -53,57 +56,61 @@ def _priorities(conn, property_id: str) -> dict[str, dict[str, Any]]:
 
 def _intent_evidence(conn, property_id: str, intent: dict[str, Any], df: date, dt: date) -> dict[str, Any]:
     iid = str(intent["id"])
-    own = conn.execute("""
+    scope = (property_id, iid, df, dt)
+    own, comps, by_engine, engine_sources, cited, weak_prompts, misses, citations = run_many(conn, [
+        ("""
         select count(*) as answers, count(distinct prompt_id) as prompts, count(distinct engine) as engines,
                round(avg(case when found_rs then 100.0/(1+0.1*(rank_rs-1)) else 0 end), 2) as visibility,
                round(100.0*avg(case when found_rs then 1 else 0 end), 2) as detection,
                min(measured_at) as first_at, max(measured_at) as last_at
-        from v_answer_scores where property_id=%s and intent_id=%s and is_neutral and day between %s and %s""",
-        (property_id, iid, df, dt)).fetchone()
-    comps = [dict(r) for r in competitor_metrics(conn, property_id, df, dt, intent_id=iid,
-                                                 answer_table="v_answer_scores", competitor_table="v_competitor_answer_scores")]
-    comps = sorted(comps, key=lambda r: -(_f(r["visibility"]) or 0))
-    by_engine = [dict(r) for r in conn.execute("""
+        from v_answer_scores where property_id=%s and intent_id=%s and is_neutral and day between %s and %s""", scope),
+        competitor_metrics_query(property_id, df, dt, intent_id=iid,
+                                 answer_table="v_answer_scores", competitor_table="v_competitor_answer_scores"),
+        ("""
         select engine, count(*) as answers, count(*) filter (where found_rs) as mentions,
                round(100.0*avg(case when found_rs then 1 else 0 end), 1) as detection
         from v_answer_scores where property_id=%s and intent_id=%s and is_neutral and day between %s and %s
-        group by engine order by 4, 1""", (property_id, iid, df, dt)).fetchall()]
-    # The web sources each assistant cites for this intent: share of its answers citing each domain.
-    engine_sources = conn.execute("""
+        group by engine order by 4, 1""", scope),
+        # The web sources each assistant cites for this intent: share of its answers citing each domain.
+        ("""
         select a.engine, lower(e.domain) as domain, count(distinct a.measurement_id) as answers
         from evidence e join v_answer_scores a on a.measurement_id = e.measurement_id
         where a.property_id=%s and a.intent_id=%s and a.is_neutral and a.day between %s and %s and e.domain is not null
-        group by 1, 2 order by 1, 3 desc, 2""", (property_id, iid, df, dt)).fetchall()
-    cited = conn.execute("""
+        group by 1, 2 order by 1, 3 desc, 2""", scope),
+        ("""
         select a.engine, count(distinct a.measurement_id) as answers
         from evidence e join v_answer_scores a on a.measurement_id = e.measurement_id
         where a.property_id=%s and a.intent_id=%s and a.is_neutral and a.day between %s and %s and e.domain is not null
-        group by 1""", (property_id, iid, df, dt)).fetchall()
-    cited_by = {r["engine"]: r["answers"] for r in cited}
-    for row in by_engine:
-        row["answers_with_links"] = cited_by.get(row["engine"], 0)
-        row["sources"] = [{"domain": s["domain"], "answers": s["answers"]}
-                          for s in engine_sources if s["engine"] == row["engine"]][:3]
-    weak_prompts = [dict(r) for r in conn.execute("""
+        group by 1""", scope),
+        ("""
         select p.prompt_text as prompt, count(*) as answers,
                round(100.0*avg(case when a.found_rs then 1 else 0 end), 1) as detection
         from v_answer_scores a join prompts p on p.id = a.prompt_id
         where a.property_id=%s and a.intent_id=%s and a.is_neutral and a.day between %s and %s
-        group by p.prompt_text order by 3, 2 desc limit 3""", (property_id, iid, df, dt)).fetchall()]
-    misses = [dict(r) for r in conn.execute("""
+        group by p.prompt_text order by 3, 2 desc limit 3""", scope),
+        ("""
         select measurement_id, engine, measured_at from v_answer_scores
         where property_id=%s and intent_id=%s and is_neutral and not found_rs and day between %s and %s
-        order by measured_at desc limit 5""", (property_id, iid, df, dt)).fetchall()]
-    citations = [dict(r) for r in conn.execute("""
+        order by measured_at desc limit 5""", scope),
+        ("""
         select e.url, e.domain, e.title, e.excerpt, e.attributed_to, e.confidence_score,
                e.verification_status, count(*) as answer_count
         from evidence e join v_answer_scores a on a.measurement_id = e.measurement_id
         where a.property_id=%s and a.intent_id=%s and a.is_neutral and a.day between %s and %s
           and e.url is not null
         group by e.url, e.domain, e.title, e.excerpt, e.attributed_to, e.confidence_score, e.verification_status
-        order by answer_count desc, e.domain, e.url limit 20""", (property_id, iid, df, dt)).fetchall()]
-    return {"own": own, "competitors": comps, "engines": by_engine, "weak_prompts": weak_prompts,
-            "sample_misses": misses, "citations": citations}
+        order by answer_count desc, e.domain, e.url limit 20""", scope),
+    ])
+    own = own[0]
+    comps = sorted((dict(r) for r in comps), key=lambda r: -(_f(r["visibility"]) or 0))
+    by_engine = [dict(r) for r in by_engine]
+    cited_by = {r["engine"]: r["answers"] for r in cited}
+    for row in by_engine:
+        row["answers_with_links"] = cited_by.get(row["engine"], 0)
+        row["sources"] = [{"domain": s["domain"], "answers": s["answers"]}
+                          for s in engine_sources if s["engine"] == row["engine"]][:3]
+    return {"own": own, "competitors": comps, "engines": by_engine, "weak_prompts": [dict(r) for r in weak_prompts],
+            "sample_misses": [dict(r) for r in misses], "citations": [dict(r) for r in citations]}
 
 
 def _actions(conn, property_id: str, intent_name: str, df: date, dt: date) -> list[dict[str, Any]]:
@@ -120,103 +127,140 @@ def _clean(obj):
     return json.loads(json.dumps(obj, default=str))
 
 
+_CACHE: dict[tuple[str, date, date], tuple[float, bool, dict[str, Any]]] = {}
+_CACHE_LOCK = threading.Lock()
+CACHE_SECONDS = 1800  # cleared on every import and priority change (monthly.clear_cache)
+
+
+def clear_cache(property_id: str | None = None) -> None:
+    with _CACHE_LOCK:
+        for key in [k for k in _CACHE if property_id is None or k[0] == str(property_id)]:
+            _CACHE.pop(key, None)
+
+
 def assess(property_id: str, date_from: date, date_to: date, save: bool = True) -> dict[str, Any]:
+    """The assessment for a period, computed once and reused until the data or priorities change."""
+    key = (str(property_id), date_from, date_to)
+    with _CACHE_LOCK:
+        hit = _CACHE.get(key)
+    if hit and time.monotonic() - hit[0] < CACHE_SECONDS:
+        result = copy.deepcopy(hit[2])
+        if save and not hit[1]:  # computed for a report read; keep a record of it now
+            _persist(property_id, date_from, date_to, result["opportunities"])
+            with _CACHE_LOCK:
+                _CACHE[key] = (hit[0], True, hit[2])
+        return {**result, "saved": save}
+    result = _assess(property_id, date_from, date_to, save)
+    if save:
+        _persist(property_id, date_from, date_to, result["opportunities"])
+    with _CACHE_LOCK:
+        _CACHE[key] = (time.monotonic(), save, copy.deepcopy(result))
+    return result
+
+
+def _persist(property_id: str, date_from: date, date_to: date, items: list[dict[str, Any]]) -> None:
+    """Keep the assessment for the period (one row per intent), so it can be audited later."""
+    if not items:
+        return
+    with connect() as conn:
+        conn.cursor().executemany("""
+                insert into opportunity_assessments (property_id, intent_id, period_start, period_end, visibility_gap,
+                    gap_status, commercial_status, validation_missing, priority_rank, proposed_action, action_kind,
+                    rationale, evidence, priority_snapshot, generated_at)
+                values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'potential_geo_improvement',%s,%s::jsonb,%s::jsonb,now())
+                on conflict (intent_id, period_start, period_end) do update set
+                    visibility_gap=excluded.visibility_gap, gap_status=excluded.gap_status,
+                    commercial_status=excluded.commercial_status, validation_missing=excluded.validation_missing,
+                    priority_rank=excluded.priority_rank, proposed_action=excluded.proposed_action,
+                    rationale=excluded.rationale, evidence=excluded.evidence,
+                    priority_snapshot=excluded.priority_snapshot, generated_at=now()""",
+                [(property_id, i["intent_id"], date_from, date_to, i["visibility"]["gap_points"], i["visibility"]["status"],
+                 i["commercial"]["status"], i["commercial"]["missing"], i["commercial"]["rank"],
+                 (i["proposed_action"] or {}).get("text"), i["rationale"],
+                 json.dumps(_clean({"visibility": i["visibility"], "competitors": i["competitor_evidence"], **i["evidence"]})),
+                 json.dumps(_clean(i["commercial"]["priority"])) if i["commercial"]["priority"] else None)
+                for i in items])  # executemany sends all rows in one round trip
+        conn.commit()
+
+
+def _assess(property_id: str, date_from: date, date_to: date, save: bool = True) -> dict[str, Any]:
     with connect() as conn:
         intents = conn.execute("""select distinct i.id, i.name from intents i join v_answer_scores a on a.intent_id = i.id
                                   where i.property_id=%s and a.day between %s and %s order by i.name""",
                                (property_id, date_from, date_to)).fetchall()
         priorities = _priorities(conn, property_id)
-        items = []
+    items = []
 
-        def _gather(intent):
-            with connect() as c:  # per-intent read-only queries run concurrently, one connection each
-                return (_intent_evidence(c, property_id, intent, date_from, date_to),
-                        _actions(c, property_id, intent["name"], date_from, date_to))
+    def _gather(intent):
+        with connect() as c:  # per-intent read-only queries run concurrently, one connection each
+            return (_intent_evidence(c, property_id, intent, date_from, date_to),
+                    _actions(c, property_id, intent["name"], date_from, date_to))
 
-        from concurrent.futures import ThreadPoolExecutor
-        with ThreadPoolExecutor(max_workers=6) as pool:
-            gathered = list(pool.map(_gather, intents))
-        for intent, (ev, actions) in zip(intents, gathered):
-            own_vis, answers = _f(ev["own"]["visibility"]), ev["own"]["answers"]
-            top = ev["competitors"][0] if ev["competitors"] else None
-            top_vis = _f(top["visibility"]) if top else None
-            if answers < MIN_NEUTRAL_ANSWERS or own_vis is None or top_vis is None:
-                gap, gap_status = None, "insufficient_data"
-            else:
-                gap = round(top_vis - own_vis, 2)
-                gap_status = "gap" if gap >= GAP_POINTS else "no_gap"
-            prio = priorities.get(str(intent["id"]))
-            missing = missing_commercial_fields(prio)
-            validated = not missing
-            top_action = actions[0] if actions else None
-            if gap_status == "gap" and top:
-                finding = (f"On neutral prompts {top['display_name'] or top['name']} reaches visibility {top_vis} vs {own_vis} "
-                           f"for the hotel ({gap} points, {answers} answers, {ev['own']['engines']} engines).")
-            elif gap_status == "no_gap":
-                finding = f"No visibility gap of {GAP_POINTS:g} points or more against tracked competitors ({answers} answers)."
-            else:
-                finding = f"Insufficient data: {answers} neutral answers (minimum {MIN_NEUTRAL_ANSWERS})."
-            score = None
-            if validated and gap_status == "gap" and all(prio.get(k) for k in RATING_FIELDS):
-                score = round(gap * WEIGHT[prio["commercial_importance"]] * WEIGHT[prio["strategic_relevance"]]
-                              * WEIGHT[prio["feasibility"]], 2)
-            if validated and gap_status == "gap":
-                rationale = (f"Gap is a verified RankScale finding. Hotel-confirmed priority: importance "
-                             f"{prio['commercial_importance']}, strategic relevance {prio['strategic_relevance']}, "
-                             f"feasibility {prio['feasibility']} (source: {prio['evidence_source']}).")
-            elif gap_status == "gap":
-                rationale = ("Gap is a verified RankScale finding. The hotel has not confirmed the commercial priority "
-                             f"(missing: {', '.join(missing)}), so this action is provisional and cannot be ranked.")
-            else:
-                rationale = "No action is proposed from visibility alone."
-            items.append({
-                "intent_id": str(intent["id"]), "intent": intent["name"],
-                "visibility": {"status": gap_status, "gap_points": gap, "hotel_visibility": own_vis,
-                               "hotel_detection": _f(ev["own"]["detection"]), "answers": answers,
-                               "top_competitor": (top["display_name"] or top["name"]) if top else None,
-                               "top_competitor_visibility": top_vis, "finding": finding, "kind": "verified_rankscale_finding"},
-                "competitor_evidence": [{"name": c["display_name"] or c["name"], "visibility": _f(c["visibility"]),
-                                         "detection": _f(c["detection"])} for c in ev["competitors"]],
-                "commercial": {"status": VALIDATED if validated else VALIDATION_REQUIRED, "missing": missing,
-                               "priority": ({k: (_f(v) if k == "revenue_potential" else v) for k, v in prio.items()
-                                             if k not in ("created_at",)} if prio else None),
-                               "rank_score": score, "rank": None},
-                "proposed_action": ({"text": top_action["title"], "type": top_action["action_type"],
-                                     "supporting_recommendations": top_action["n"],
-                                     "kind": "potential_geo_improvement"} if top_action and gap_status == "gap"
-                                    else None),
-                "other_actions": [a["title"] for a in actions[1:]] if gap_status == "gap" else [],
-                "rationale": rationale,
-                "evidence": {"period": {"from": date_from, "to": date_to, "first_measurement": ev["own"]["first_at"],
-                                        "last_measurement": ev["own"]["last_at"]},
-                             "prompts": ev["own"]["prompts"], "engines": ev["engines"], "weakest_prompts": ev["weak_prompts"],
-                             "sample_missing_answers": ev["sample_misses"], "citations": ev["citations"]},
-            })
-        ranked = sorted((i for i in items if i["commercial"]["rank_score"] is not None),
-                        key=lambda i: -i["commercial"]["rank_score"])
-        for n, item in enumerate(ranked, 1):
-            item["commercial"]["rank"] = n
-        items.sort(key=lambda i: (i["commercial"]["rank"] is None, i["commercial"]["rank"] or 0,
-                                  -(i["visibility"]["gap_points"] or -999)))
-        if save:
-            for i in items:
-                conn.execute("""
-                    insert into opportunity_assessments (property_id, intent_id, period_start, period_end, visibility_gap,
-                        gap_status, commercial_status, validation_missing, priority_rank, proposed_action, action_kind,
-                        rationale, evidence, priority_snapshot, generated_at)
-                    values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'potential_geo_improvement',%s,%s::jsonb,%s::jsonb,now())
-                    on conflict (intent_id, period_start, period_end) do update set
-                        visibility_gap=excluded.visibility_gap, gap_status=excluded.gap_status,
-                        commercial_status=excluded.commercial_status, validation_missing=excluded.validation_missing,
-                        priority_rank=excluded.priority_rank, proposed_action=excluded.proposed_action,
-                        rationale=excluded.rationale, evidence=excluded.evidence,
-                        priority_snapshot=excluded.priority_snapshot, generated_at=now()""",
-                    (property_id, i["intent_id"], date_from, date_to, i["visibility"]["gap_points"], i["visibility"]["status"],
-                     i["commercial"]["status"], i["commercial"]["missing"], i["commercial"]["rank"],
-                     (i["proposed_action"] or {}).get("text"), i["rationale"],
-                     json.dumps(_clean({"visibility": i["visibility"], "competitors": i["competitor_evidence"], **i["evidence"]})),
-                     json.dumps(_clean(i["commercial"]["priority"])) if i["commercial"]["priority"] else None))
-            conn.commit()
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=6) as pool:  # no connection is held while the workers run
+        gathered = list(pool.map(_gather, intents))
+    for intent, (ev, actions) in zip(intents, gathered):
+        own_vis, answers = _f(ev["own"]["visibility"]), ev["own"]["answers"]
+        top = ev["competitors"][0] if ev["competitors"] else None
+        top_vis = _f(top["visibility"]) if top else None
+        if answers < MIN_NEUTRAL_ANSWERS or own_vis is None or top_vis is None:
+            gap, gap_status = None, "insufficient_data"
+        else:
+            gap = round(top_vis - own_vis, 2)
+            gap_status = "gap" if gap >= GAP_POINTS else "no_gap"
+        prio = priorities.get(str(intent["id"]))
+        missing = missing_commercial_fields(prio)
+        validated = not missing
+        top_action = actions[0] if actions else None
+        if gap_status == "gap" and top:
+            finding = (f"On neutral prompts {top['display_name'] or top['name']} reaches visibility {top_vis} vs {own_vis} "
+                       f"for the hotel ({gap} points, {answers} answers, {ev['own']['engines']} engines).")
+        elif gap_status == "no_gap":
+            finding = f"No visibility gap of {GAP_POINTS:g} points or more against tracked competitors ({answers} answers)."
+        else:
+            finding = f"Insufficient data: {answers} neutral answers (minimum {MIN_NEUTRAL_ANSWERS})."
+        score = None
+        if validated and gap_status == "gap" and all(prio.get(k) for k in RATING_FIELDS):
+            score = round(gap * WEIGHT[prio["commercial_importance"]] * WEIGHT[prio["strategic_relevance"]]
+                          * WEIGHT[prio["feasibility"]], 2)
+        if validated and gap_status == "gap":
+            rationale = (f"Gap is a verified RankScale finding. Hotel-confirmed priority: importance "
+                         f"{prio['commercial_importance']}, strategic relevance {prio['strategic_relevance']}, "
+                         f"feasibility {prio['feasibility']} (source: {prio['evidence_source']}).")
+        elif gap_status == "gap":
+            rationale = ("Gap is a verified RankScale finding. The hotel has not confirmed the commercial priority "
+                         f"(missing: {', '.join(missing)}), so this action is provisional and cannot be ranked.")
+        else:
+            rationale = "No action is proposed from visibility alone."
+        items.append({
+            "intent_id": str(intent["id"]), "intent": intent["name"],
+            "visibility": {"status": gap_status, "gap_points": gap, "hotel_visibility": own_vis,
+                           "hotel_detection": _f(ev["own"]["detection"]), "answers": answers,
+                           "top_competitor": (top["display_name"] or top["name"]) if top else None,
+                           "top_competitor_visibility": top_vis, "finding": finding, "kind": "verified_rankscale_finding"},
+            "competitor_evidence": [{"name": c["display_name"] or c["name"], "visibility": _f(c["visibility"]),
+                                     "detection": _f(c["detection"])} for c in ev["competitors"]],
+            "commercial": {"status": VALIDATED if validated else VALIDATION_REQUIRED, "missing": missing,
+                           "priority": ({k: (_f(v) if k == "revenue_potential" else v) for k, v in prio.items()
+                                         if k not in ("created_at",)} if prio else None),
+                           "rank_score": score, "rank": None},
+            "proposed_action": ({"text": top_action["title"], "type": top_action["action_type"],
+                                 "supporting_recommendations": top_action["n"],
+                                 "kind": "potential_geo_improvement"} if top_action and gap_status == "gap"
+                                else None),
+            "other_actions": [a["title"] for a in actions[1:]] if gap_status == "gap" else [],
+            "rationale": rationale,
+            "evidence": {"period": {"from": date_from, "to": date_to, "first_measurement": ev["own"]["first_at"],
+                                    "last_measurement": ev["own"]["last_at"]},
+                         "prompts": ev["own"]["prompts"], "engines": ev["engines"], "weakest_prompts": ev["weak_prompts"],
+                         "sample_missing_answers": ev["sample_misses"], "citations": ev["citations"]},
+        })
+    ranked = sorted((i for i in items if i["commercial"]["rank_score"] is not None),
+                    key=lambda i: -i["commercial"]["rank_score"])
+    for n, item in enumerate(ranked, 1):
+        item["commercial"]["rank"] = n
+    items.sort(key=lambda i: (i["commercial"]["rank"] is None, i["commercial"]["rank"] or 0,
+                              -(i["visibility"]["gap_points"] or -999)))
     return _clean({"property_id": property_id, "period": {"from": date_from, "to": date_to}, "saved": save,
                    "opportunities": items,
                    "method": {"gap_points": GAP_POINTS, "min_answers": MIN_NEUTRAL_ANSWERS,
@@ -284,6 +328,7 @@ def save_priority(property_id: str, intent_id: str, user_id: str, data: dict[str
         conn.execute("insert into intent_business_priority_history (property_id, intent_id, snapshot, changed_by) "
                      "values (%s,%s,%s::jsonb,%s)", (property_id, intent_id, json.dumps(_clean(dict(row))), user_id))
         conn.commit()
+    clear_cache(property_id)  # the ranking depends on the confirmed priorities
     return _clean({**row, "confirmed_by_name": user["name"] if confirmed else None,
                    "status": VALIDATED if not missing_commercial_fields(dict(row)) else VALIDATION_REQUIRED,
                    "missing": missing_commercial_fields(dict(row))})

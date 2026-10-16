@@ -8,14 +8,15 @@ import { coogeeClient, createClient, isCoogee, listClients, loadClients, resolve
 import { LibraryPage } from "./features/library/LibraryPage";
 import { listLibrary, saveLibraryEntry, saveSourceFile } from "./features/library/libraryStore";
 import { PromptExports } from "./features/prompt/PromptExports";
-import { buildClientReport } from "./features/reports/model/clientReport";
 import { REPORT_SECTIONS, ReportHub } from "./features/reports/ReportHub";
+import { ReportSetupPage } from "./features/settings/ReportSetupPage";
 import { SettingsButton, SettingsPage } from "./features/settings/SettingsPage";
 import { WorkflowHost } from "./features/workflow/WorkflowHost";
 import { RankscaleSteps, WorkflowSwitch } from "./features/workflow/WorkflowNav";
 import { setWorkspaceSetting } from "./lib/workspaceSettings";
 
 const uniqueId = (prefix) => `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+const PROMPT_SETUP_CLIENT_KEY = "geo.promptSetup.clientId";
 const REVIEW_TABS = [
   ["alerts", "Insights & explanations"],
   ["recommendations", "Recommendations"],
@@ -37,6 +38,7 @@ function App() {
   const [monthlySection, setMonthlySection] = useState("alerts");
   const [reviewCounts, setReviewCounts] = useState({ alerts: 0, recommendations: 0 });
   const [selectedClient, setSelectedClient] = useState(null);
+  const [uploadedClientIds, setUploadedClientIds] = useState([]);
   const [clientCreateRequest, setClientCreateRequest] = useState(0);
   const [promptImportRequest, setPromptImportRequest] = useState(0);
   const [phase, setPhase] = useState(1);
@@ -66,6 +68,12 @@ function App() {
   }, [account, refreshLibrary]);
 
   useEffect(() => {
+    if (area === "workflow" && phase === 1 && selectedClient?.id) {
+      window.localStorage.setItem(PROMPT_SETUP_CLIENT_KEY, String(selectedClient.id));
+    }
+  }, [area, phase, selectedClient?.id]);
+
+  useEffect(() => {
     if (account) setWorkspaceSetting("geo.reviewer", account.name);
   }, [account]);
 
@@ -92,6 +100,8 @@ function App() {
 
   function signOut() {
     rememberAccount(null);
+    window.localStorage.removeItem(PROMPT_SETUP_CLIENT_KEY);
+    if (selectedClient?.id) window.localStorage.removeItem(`geo.promptSetup.run.${selectedClient.id}`);
     setAccount(null);
     setToast("");
     setArea("workflow");
@@ -163,7 +173,9 @@ function App() {
     async (upload) => {
       let client = selectedClient || defaultClient();
       if (upload?.summary) {
+        if (client?.id) setUploadedClientIds((ids) => (ids.includes(client.id) ? ids : [...ids, client.id]));
         // An upload loads the records as measurements; refresh so the team review becomes available.
+        void refreshLibrary().catch(() => null); // the upload is now in the import history
         const clientId = client?.id;
         void loadClients()
           .then((fresh) => {
@@ -186,25 +198,13 @@ function App() {
         return;
       }
       setReportRequest(null);
-      if (upload?.summary) {
-        setToast("Upload complete. Creating your report…");
-        if (client?.id && upload.rows?.length) {
-          try {
-            await saveReport(
-              buildClientReport({ client, rows: upload.rows, period: { from: upload.summary.dateFrom, to: upload.summary.dateTo }, createdBy: account?.name }),
-            );
-            setToast("Upload complete. Your report is ready.");
-          } catch (error) {
-            setToast(`Data saved. ${error.message}`);
-          }
-        }
-      }
+      if (upload?.summary) setToast("Upload complete. The report has been updated.");
       setReportSection("client");
       setOverviewSource("rankscale");
       setArea("reports");
       window.scrollTo(0, 0);
     },
-    [selectedClient, account, saveReport],
+    [selectedClient, refreshLibrary],
   );
 
   function openReportRequest(request) {
@@ -467,7 +467,7 @@ function App() {
           </div>
           <WorkflowSwitch activeGroup={activeGroup} onPromptUpload={() => startWorkflow(1, false)} onRankscaleUpload={() => startWorkflow(2, false)} />
           <div className="workspace-header-actions">
-            <SettingsButton active={area === "settings" || area === "library"} onClick={openSettings} />
+            <SettingsButton active={area === "settings" || area === "library" || area === "report-setup"} onClick={openSettings} />
             <details className="workspace-account">
               <summary aria-label={`Account: ${account.name}, ${account.role}`}>
                 <span className="workspace-avatar">{initialsOf(account)}</span>
@@ -495,6 +495,7 @@ function App() {
         {activeGroup === "rankscale" && (
           <RankscaleSteps
             activeStep={area === "reports" || area === "monthly" ? 2 : 1}
+            reportReady={area === "reports" || area === "monthly" || uploadedClientIds.includes(selectedClient?.id)}
             onUpload={() => {
               if (area !== "workflow" || phase !== 2) startWorkflow(2, false);
             }}
@@ -575,7 +576,22 @@ function App() {
           />
         </div>
         <div className="guided-container" hidden={area !== "settings"}>
-          {area === "settings" && <SettingsPage onOpenImports={() => openLibrary(1)} />}
+          {area === "settings" && (
+            <SettingsPage onOpenImports={() => openLibrary(1)} onOpenReportSetup={() => setArea("report-setup")} clientName={selectedClient?.name} />
+          )}
+        </div>
+        <div className="guided-container settings-imports" hidden={area !== "report-setup"}>
+          <nav className="settings-imports-breadcrumb" aria-label="Settings breadcrumb">
+            <button type="button" className="settings-imports-back" onClick={openSettings}>
+              <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="1.7" aria-hidden="true">
+                <path d="m14 6-6 6 6 6" />
+              </svg>
+              Settings
+            </button>
+            <span aria-hidden="true">/</span>
+            <span aria-current="page">Report setup</span>
+          </nav>
+          {area === "report-setup" && <ReportSetupPage client={selectedClient} />}
         </div>
         <div className="guided-container settings-imports" hidden={area !== "library"}>
           <nav className="settings-imports-breadcrumb" aria-label="Settings breadcrumb">

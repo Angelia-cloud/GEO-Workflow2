@@ -73,6 +73,17 @@ def _monthly_text(property_id: str, dt: date) -> str:
     return " ".join(parts)
 
 
+def _alias_examples(row) -> str:
+    """A few of the client's own other names (outlets, former names), e.g. " (e.g. Shutters, Rick Stein)"."""
+    if not row:
+        return ""
+    name = (row["name"] or "").casefold()
+    others = [a.rstrip("*") for a in (row["aliases"] or []) if a.rstrip("*").casefold() not in name
+              and name not in a.casefold()]
+    picks = sorted(dict.fromkeys(others), key=len)[:3]
+    return f" (e.g. {', '.join(picks)})" if picks else ""
+
+
 def build_context(property_id: str, date_from: date | None = None, date_to: date | None = None) -> dict:
     """Return {client, periodLabel, topics, suggestions, ready, definitions} for one property."""
     rep = build_report(property_id, date_from, date_to)
@@ -87,6 +98,7 @@ def build_context(property_id: str, date_from: date | None = None, date_to: date
                                      count(*) filter (where found_rs) found_rs, count(*) filter (where found_any) found_any
                               from v_answer_scores where property_id = %s and day between %s and %s""",
                            (property_id, df, dt)).fetchone()
+        alias_row = conn.execute("select name, aliases from properties where id = %s", (property_id,)).fetchone()
         engines = [r["engine"] for r in conn.execute(
             "select distinct engine from v_answer_scores where property_id=%s and day between %s and %s order by 1",
             (property_id, df, dt)).fetchall()]
@@ -112,7 +124,7 @@ def build_context(property_id: str, date_from: date | None = None, date_to: date
         f"Data: {cnt['answers']:,} verified RankScale answers across {cnt['prompts']} tracked prompts and {cnt['engines']} AI assistants "
         f"({', '.join(engines)}). Of these, {cnt['neutral_answers']:,} answers come from the neutral (non-hotel-named) prompt set used for competitor comparison. "
         "Detection rate = share of answers that mention the hotel, using RankScale's own brand match. "
-        f"Counting every confirmed hotel alias (e.g. Shutters, Rick Stein, Eliva Spa) instead gives {cnt['found_any']:,} of {cnt['answers']:,} = "
+        f"Counting every confirmed hotel name{_alias_examples(alias_row)} instead gives {cnt['found_any']:,} of {cnt['answers']:,} = "
         f"{100 * cnt['found_any'] / cnt['answers']:.1f}%; RankScale's match gives {cnt['found_rs']:,} of {cnt['answers']:,} = {100 * cnt['found_rs'] / cnt['answers']:.1f}%. "
         "Visibility score = average answer score, where an answer scores 100/(1+0.1*(rank-1)) when the hotel is mentioned at that rank and 0 otherwise. "
         "Average position is the mean rank when mentioned (lower is better); Top 3 = share of answers where the hotel ranks 1 to 3. "

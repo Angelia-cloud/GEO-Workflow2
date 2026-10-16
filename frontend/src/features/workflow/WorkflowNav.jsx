@@ -50,7 +50,7 @@ function WorkflowSwitch({ activeGroup, onPromptUpload, onRankscaleUpload }) {
   );
 }
 export { WorkflowSwitch };
-function RankscaleSteps({ activeStep, onUpload, onReport }) {
+function RankscaleSteps({ activeStep, onUpload, onReport, reportReady = true }) {
   return (
     <nav className="rankscale-steps-band" aria-label="Rankscale steps">
       <ol className="rankscale-steps">
@@ -64,8 +64,9 @@ function RankscaleSteps({ activeStep, onUpload, onReport }) {
           {
             number: 2,
             label: "Report",
-            hint: "View insights & recommendations",
+            hint: reportReady ? "View insights & recommendations" : "Upload data first",
             action: onReport,
+            disabled: !reportReady,
           },
         ].map((n) => (
           <li key={n.number}>
@@ -73,6 +74,7 @@ function RankscaleSteps({ activeStep, onUpload, onReport }) {
               type="button"
               aria-current={activeStep === n.number ? "step" : undefined}
               onClick={n.action}
+              disabled={n.disabled}
             >
               <span className="rankscale-step-number">{n.number}</span>
               <span className="rankscale-step-copy">

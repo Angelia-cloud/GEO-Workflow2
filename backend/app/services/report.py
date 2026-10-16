@@ -11,6 +11,8 @@ monthly report); `names='all'` counts every confirmed hotel name (Crowne Plaza, 
 """
 from __future__ import annotations
 
+import re
+
 from datetime import date, timedelta
 
 from ..db import connect
@@ -18,6 +20,20 @@ from ..db import connect
 METRICS = ("visibility", "detection", "position", "top3", "sentiment")
 LOWER_IS_BETTER = {"position"}
 MIN_TREND_ANSWERS = 30
+
+
+_BRANDS = re.compile(r"^(InterContinental|Crowne Plaza|Holiday Inn( Express)?|voco|Hotel Indigo|Kimpton|Regent|"
+                     r"Six Senses|Vignette|Even Hotels|Hotel)\s+", re.I)
+_CITIES = re.compile(r"^(Sydney|Melbourne|Brisbane|Perth|Adelaide|Canberra(?= \S))\s+", re.I)
+
+
+def short_name(name: str, configured: str | None = None) -> str:
+    """How report text names the client's hotel: the name set in Report setup, else the property name
+    without its brand and city words ("InterContinental Sydney Coogee Beach" → "Coogee Beach")."""
+    if configured and configured.strip():
+        return configured.strip()
+    short = _CITIES.sub("", _BRANDS.sub("", re.sub(r"\s*\(.*?\)", "", name or ""))).strip()
+    return short or name
 
 
 def _cols(names: str) -> tuple[str, str, str]:
@@ -60,6 +76,12 @@ def _benchmarks(conn, pid: str) -> dict:
     return out
 
 
+def _latest(bms: dict, kind: str) -> str | None:
+    """The client's most recent benchmark set of a kind ('baseline', 'benchmark', 'report')."""
+    labels = [(v["as_of"] or date.min, label) for label, v in bms.items() if v["kind"] == kind]
+    return max(labels)[1] if labels else None
+
+
 def _bm(bms: dict, label: str, pset: str, dim: str, key: str, metric: str):
     return bms.get(label, {}).get("values", {}).get((pset, dim, key, metric))
 
@@ -68,6 +90,15 @@ def competitor_metrics(conn, property_id: str, date_from: date, date_to: date,
                        intent_id: str | None = None, engine_id: str | None = None,
                        answer_table: str = "_ans", competitor_table: str = "_comp") -> list[dict]:
     """Tracked competitor metrics using the report's neutral-set denominator and score formula."""
+    sql, params = competitor_metrics_query(property_id, date_from, date_to, intent_id, engine_id,
+                                           answer_table, competitor_table)
+    return conn.execute(sql, params).fetchall()
+
+
+def competitor_metrics_query(property_id: str, date_from: date, date_to: date,
+                             intent_id: str | None = None, engine_id: str | None = None,
+                             answer_table: str = "_ans", competitor_table: str = "_comp") -> tuple[str, dict]:
+    """The competitor_metrics SQL and parameters, so callers can batch it with other queries."""
     if answer_table not in {"_ans", "v_answer_scores"} or competitor_table not in {"_comp", "v_competitor_answer_scores"}:
         raise ValueError("unsupported report score source")
     where = ["property_id = %(pid)s", "day between %(df)s and %(dt)s", "is_neutral"]
@@ -84,7 +115,7 @@ def competitor_metrics(conn, property_id: str, date_from: date, date_to: date,
         comp_filters.append("c.intent = (select name from intents where id = %(iid)s)")
     if engine_id:
         comp_filters.append("c.engine = (select name from engines where id = %(eid)s)")
-    return conn.execute(f"""
+    return (f"""
         with total as (select count(*) n from {answer_table} where {scoped})
         select g.name, g.display_name, g.sort_order, (select n from total) as answers,
                round(coalesce(sum(100.0 / (1 + 0.1 * (c.rank - 1))), 0) / nullif((select n from total), 0), 2) as visibility,
@@ -95,7 +126,7 @@ def competitor_metrics(conn, property_id: str, date_from: date, date_to: date,
         from competitor_groups g
         left join {competitor_table} c on {' and '.join(comp_filters)}
         where g.property_id = %(pid)s and g.is_tracked
-        group by g.id order by g.sort_order""", params).fetchall()
+        group by g.id order by g.sort_order""", params)
 
 
 LENS_OF = {"content_gap": "Relevance", "entity_confusion": "Clarity", "negative_sentiment": "Clarity",
@@ -149,12 +180,12 @@ def _interpret(metric: str, mv: dict | None, current) -> str:
 
 
 def build_report(pid: str, date_from: date | None = None, date_to: date | None = None,
-                 names: str = "rankscale", baseline_label: str = "Pre-schema baseline",
-                 benchmark_label: str = "13 Aug benchmark", target_label: str = "Target") -> dict:
+                 names: str = "rankscale", baseline_label: str | None = None,
+                 benchmark_label: str | None = None, target_label: str = "Target") -> dict:
     found, rank, sent = _cols(names)
     M = _metric_sql(found, rank, sent)
     with connect() as conn:
-        prop = conn.execute("select id, name from properties where id = %s", (pid,)).fetchone()
+        prop = conn.execute("select id, name, short_name from properties where id = %s", (pid,)).fetchone()
         if not prop:
             raise ValueError("property not found")
         # snapshot the views once for this property; every query below reads these (much faster
@@ -175,6 +206,9 @@ def build_report(pid: str, date_from: date | None = None, date_to: date | None =
         cur_w = "property_id = %(pid)s and day between %(df)s and %(dt)s"
         prev_w = "property_id = %(pid)s and day between %(pf)s and %(pt)s"
         bms = _benchmarks(conn, pid)
+        baseline_label = baseline_label or _latest(bms, "baseline") or "Baseline"
+        benchmark_label = benchmark_label or _latest(bms, "benchmark") or "Benchmark"
+        last_report_label = _latest(bms, "report")
 
         def one(where: str, extra: str = "") -> dict:
             return _num(conn.execute(f"select {M} from _ans where {where} {extra}", P).fetchone())
@@ -187,7 +221,7 @@ def build_report(pid: str, date_from: date | None = None, date_to: date | None =
                 "metric": m, "current": full_cur.get(m),
                 "vs_baseline": movement(full_cur.get(m), _bm(bms, baseline_label, "full", "overall", "", m), m),
                 "vs_previous": movement(full_cur.get(m), full_prev.get(m), m) if full_prev.get("answers") else None,
-                "vs_last_report": movement(full_cur.get(m), _bm(bms, "Aug 2026 report", "full", "overall", "", m), m),
+                "vs_last_report": movement(full_cur.get(m), _bm(bms, last_report_label, "full", "overall", "", m), m),
                 # "Show baseline, current, movement and target together wherever possible."
                 "baseline": _bm(bms, baseline_label, "full", "overall", "", m),
                 "target": _bm(bms, target_label, "full", "overall", "", m),
@@ -229,7 +263,8 @@ def build_report(pid: str, date_from: date | None = None, date_to: date | None =
                                           where i.property_id = %s and p.status = 'tracked'
                                             and exists (select 1 from v_measurements_flat f where f.prompt_id = p.id)""", (pid,)).fetchone()
         comp_rows = competitor_metrics(conn, pid, date_from, date_to)
-        competitors = [{"name": prop["name"], "short": "Coogee", "is_self": True, **neutral_cur}] + \
+        me_short = short_name(prop["name"], prop.get("short_name")) if prop else ""
+        competitors = [{"name": prop["name"], "short": me_short, "is_self": True, **neutral_cur}] + \
                       [{**_num(r), "name": r["display_name"] or r["name"], "short": r["name"], "is_self": False}
                        for r in comp_rows]
         neutral_vs_benchmark = [{
@@ -273,14 +308,14 @@ def build_report(pid: str, date_from: date | None = None, date_to: date | None =
                 names_ = " and ".join(n for n, _ in ahead[:2])
                 gap = ahead[0][1] - mine
                 text = f"{names_} currently {'edges' if len(ahead) == 1 and gap < 5 else 'stronger'}" + \
-                       (" Coogee" if len(ahead) == 1 and gap < 5 else "")
+                       (f" {me_short}" if len(ahead) == 1 and gap < 5 else "")
                 shown = ahead[:2]
             else:
                 gap = mine - (rivals[0][1] if rivals else 0)
-                text = ("Clear Coogee lead" if gap >= 20 else "Strong Coogee lead" if gap >= 10
-                        else f"Coogee leads; {rivals[0][0]} is nearest" if rivals else "Coogee leads")
+                text = (f"Clear {me_short} lead" if gap >= 20 else f"Strong {me_short} lead" if gap >= 10
+                        else f"{me_short} leads; {rivals[0][0]} is nearest" if rivals else f"{me_short} leads")
                 shown = rivals[:1]
-            intent_comp.append({"intent": intent, "coogee": mine,
+            intent_comp.append({"intent": intent, "hotel": mine,
                                 "leaders": [{"name": n, "visibility": v} for n, v in shown],
                                 "status": "behind" if ahead else "lead", "implication": text})
 
@@ -499,8 +534,8 @@ def build_report(pid: str, date_from: date | None = None, date_to: date | None =
         "baseline_label": baseline_label, "benchmark_label": benchmark_label,
         "baseline_visibility": _bm(bms, baseline_label, "full", "overall", "", "visibility"),
         "benchmarks": [{"label": k, "kind": v["kind"], "as_of": v["as_of"]} for k, v in bms.items()],
-        "last_report": {"label": "Aug 2026 report",
-                        "neutral_visibility": {k[2] or "__self__": v for k, v in bms.get("Aug 2026 report", {}).get("values", {}).items()
+        "last_report": {"label": last_report_label,
+                        "neutral_visibility": {k[2] or "__self__": v for k, v in bms.get(last_report_label, {}).get("values", {}).items()
                                                if k[0] == "neutral" and k[3] == "visibility" and k[1] in ("overall", "competitor")}},
         "prompt_sets": {"full": neutral_prompts["total"], "neutral": neutral_prompts["neutral"]},
         "overall": overall, "overall_answers": full_cur.get("answers"),
@@ -541,11 +576,11 @@ def _insights(full, overall, engines, intents, competitors, nvb, intent_comp) ->
     if me and rivals:
         top_rival = max(rivals, key=lambda c: c.get("visibility") or 0)
         if (me.get("visibility") or 0) >= (top_rival.get("visibility") or 0):
-            qual.append(f"Coogee still leads the neutral competitor set ({me['visibility']} vs "
+            qual.append(f"{me['short']} still leads the neutral competitor set ({me['visibility']} vs "
                         f"{top_rival['short']} {top_rival['visibility']}).")
         else:
             qual.append(f"{top_rival['short']} leads the neutral competitor set ({top_rival['visibility']} vs "
-                        f"Coogee {me['visibility']}).")
+                        f"{me['short']} {me['visibility']}).")
     nv = next((x for x in nvb if x["metric"] == "visibility"), None)
     if nv and nv["movement"]:
         qual.append(f"Neutral visibility is {nv['current']} vs {nv['benchmark']} at the benchmark "

@@ -84,6 +84,7 @@ create table if not exists public.rankscale_records (
   primary key (client_id, id)
 );
 create index if not exists rankscale_records_day_idx on public.rankscale_records (client_id, day);
+create index if not exists rankscale_records_answer_idx on public.rankscale_records (client_id, answer_id);
 
 -- row level security, matching the other tables
 do $$

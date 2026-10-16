@@ -1,20 +1,19 @@
 import { useEffect, useRef, useState } from "react";
 import { isCoogee } from "../clients/clients";
-import { saveSourceFile } from "../library/libraryStore";
-import { importRankscaleFile, loadRankscaleHistory } from "./historyStore";
+import { importRankscaleFile, waitForImport } from "./historyStore";
 import { summariseRecords } from "./parseRankscale";
 import { RankscaleIntake } from "./RankscaleIntake";
 
 const fmtNumber = (value) => Number(value || 0).toLocaleString("en-AU");
-const emptyHistory = () => ({ rows: [], sources: [], summary: summariseRecords([]) });
+const emptyHistory = () => ({ rows: [], summary: summariseRecords([]) });
 const MAX_BYTES = 64 * 1024 * 1024;
 
 /** Phase 2 · step 1 — upload a Rankscale export for the selected client. */
 function RankscaleUpload({ client, reviewer, onOpenDashboard }) {
   const [history, setHistory] = useState(emptyHistory);
   const [lastFile, setLastFile] = useState(null);
-  const [loading, setLoading] = useState(true);
   const [uploading, setUploading] = useState(false);
+  const [preparing, setPreparing] = useState(false);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const activeClient = useRef(client?.id);
@@ -22,33 +21,20 @@ function RankscaleUpload({ client, reviewer, onOpenDashboard }) {
   activeClient.current = client?.id;
 
   useEffect(() => {
-    let live = true;
     activeClient.current = client?.id;
     setHistory(emptyHistory());
     setLastFile(null);
     setError("");
     setNotice("");
-    setLoading(true);
     setUploading(false);
-    loadRankscaleHistory(client?.id)
-      .then((saved) => {
-        if (!live) return;
-        setHistory(saved);
-        setLoading(false);
-      })
-      .catch((failure) => {
-        if (!live) return;
-        setError(failure.message || "Stored Rankscale data could not be opened. Please try again.");
-        setLoading(false);
-      });
+    setPreparing(false);
     return () => {
-      live = false;
       activeClient.current = null;
     };
   }, [client?.id]);
 
   async function upload(file) {
-    if (!file || loading || inFlight.current) return;
+    if (!file || inFlight.current) return;
     if (!client?.id) {
       setError("Choose a client in the top bar first.");
       return;
@@ -65,32 +51,43 @@ function RankscaleUpload({ client, reviewer, onOpenDashboard }) {
     try {
       const result = await importRankscaleFile(clientId, file, reviewer);
       if (activeClient.current !== clientId) return;
-      void saveSourceFile({
-        phase: 2,
-        clientId,
-        client: client.name,
-        property: client.property,
-        uploadedBy: reviewer,
-        file,
-        importId: result.latestImport?.id,
-        summary: { rowCount: result.latestImport?.rowsProcessed ?? result.added },
-      }).catch(() => null); // the records are saved even if the copy of the file is not
+      // the server keeps the original file in the import history
       if (activeClient.current !== clientId) return;
       setHistory(result);
       setLastFile(file);
+      const counts = `${fmtNumber(result.added)} records added${result.duplicates ? ` \xB7 ${fmtNumber(result.duplicates)} existing records skipped` : ""}`;
+      // The answers are added to the report tables in the background; open the report once they are in.
+      setUploading(false);
+      setPreparing(true);
+      setNotice(`${counts}. Adding the answers to the report…`);
+      const status = result.latestImport?.id
+        ? await waitForImport(clientId, result.latestImport.id, { isCancelled: () => activeClient.current !== clientId })
+        : { status: "loaded" };
+      if (!status || activeClient.current !== clientId) return;
+      setPreparing(false);
+      if (status.status === "failed") {
+        setError(`The records were saved, but they could not be added to the report: ${status.followUp?.reason || "unknown error"}.`);
+        return;
+      }
       setNotice(
-        `${fmtNumber(result.added)} records added${result.duplicates ? ` \xB7 ${fmtNumber(result.duplicates)} existing records skipped` : ""}. Upload complete. All records are saved in the GEO database.`,
+        status.status === "timeout"
+          ? `${counts}. The report is still being updated; it will show the new answers shortly.`
+          : `${counts}. Upload complete. All records are saved in the GEO database.`,
       );
       onOpenDashboard?.(result);
     } catch (failure) {
       if (activeClient.current === clientId) setError(failure.message || "This file could not be read.");
     } finally {
       inFlight.current = false;
-      if (activeClient.current === clientId) setUploading(false);
+      if (activeClient.current === clientId) {
+        setUploading(false);
+        setPreparing(false);
+      }
     }
   }
 
-  const busy = loading || uploading;
+  const busy = uploading || preparing;
+  const importedRows = history.summary?.rowCount || history.rows.length || 0;
   return (
     <div className="guided-shell rankscale-flow">
       <main className="guided-container guided-main">
@@ -106,14 +103,12 @@ function RankscaleUpload({ client, reviewer, onOpenDashboard }) {
         </div>
         <RankscaleIntake
           clientName={client?.name}
-          historySummary={history.summary}
           onFileChange={upload}
           busy={busy}
           uploading={uploading}
           error={error}
           importNotice={notice}
-          hasHistory={!!history.rows.length}
-          sourceName={lastFile?.name || history.sources.at(-1)}
+          sourceName={lastFile?.name || ""}
         />
       </main>
       <footer className="guided-footer">
@@ -122,13 +117,13 @@ function RankscaleUpload({ client, reviewer, onOpenDashboard }) {
             <span role="status">
               {uploading
                 ? "Reading and saving all records…"
-                : loading
-                  ? "Loading saved history…"
-                  : history.rows.length
-                    ? `${fmtNumber(history.summary.rowCount)} records saved`
-                    : "Import a file to save your data"}
+                : preparing
+                  ? "Adding the answers to the report…"
+                  : importedRows
+                    ? `${fmtNumber(importedRows)} records imported`
+                    : "Import a file to create your report"}
             </span>
-            <button className="guided-primary" disabled={busy || !history.rows.length} onClick={() => onOpenDashboard?.()}>
+            <button className="guided-primary" disabled={busy || !importedRows} onClick={() => onOpenDashboard?.(history)}>
               View report<span aria-hidden="true">{" →"}</span>
             </button>
           </div>

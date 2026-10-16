@@ -16,7 +16,8 @@ router = APIRouter()
 @router.get("/api/report/{property_id}")
 def report(property_id: str, date_from: date | None = None, date_to: date | None = None,
            names: Literal["rankscale", "all"] = "rankscale",
-           baseline: str = "Pre-schema baseline", benchmark: str = "13 Aug benchmark", target: str = "Target"):
+           baseline: str | None = None, benchmark: str | None = None, target: str = "Target"):
+    """baseline / benchmark default to the client's latest saved baseline and benchmark."""
     from ..services.report import build_report
     try:
         return build_report(property_id, date_from, date_to, names, baseline, benchmark, target)

@@ -21,7 +21,7 @@ def llm_status() -> dict:
     """Which LLM the agents use, and whether a key is configured (no key → rule-based fallbacks)."""
     provider = (os.environ.get("GEO_LLM_PROVIDER") or "groq").lower()
     keys = {"groq": "GROQ_API_KEY", "anthropic": "ANTHROPIC_API_KEY", "openai": "OPENAI_API_KEY"}
-    ready = provider in keys and bool(os.environ.get(keys[provider]))
+    ready = provider == "groq" and bool(os.environ.get(keys[provider]))
     from agents.llm import DEFAULT_MODELS
     return {"provider": provider, "model": os.environ.get("GEO_LLM_MODEL") or DEFAULT_MODELS.get(provider),
             "ready": ready, "mode": "ai" if ready else "rules"}

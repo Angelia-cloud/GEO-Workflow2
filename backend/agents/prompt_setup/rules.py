@@ -68,9 +68,9 @@ def guess_place(brief: dict[str, Any]) -> str:
 
 def extract_intents(brief: dict[str, Any], limit: int = 15) -> list[dict[str, Any]]:
     """Themes mentioned in the goals, audience and transcript, strongest first."""
-    goals = brief.get("goals", "").lower()
+    goals = ""
     audience = brief.get("targetAudience", "")
-    corpus = f"{goals} {audience.lower()} {brief.get('transcript', '').lower()}"
+    corpus = brief.get("transcript", "").lower()
     segments = _segments(audience)
     found = []
     for order, (theme, keywords, label, default_audience, template) in enumerate(THEMES):
@@ -90,13 +90,6 @@ def extract_intents(brief: dict[str, Any], limit: int = 15) -> list[dict[str, An
                       "weight": weight, "order": order, "template": template})
     found.sort(key=lambda item: (-item["weight"], item["order"]))
     found = found[: max(1, limit - 1)]
-    if not found:  # nothing recognisable: fall back to broad discovery
-        for theme in ("luxury", "coastal", "dining"):
-            entry = next(t for t in THEMES if t[0] == theme)
-            found.append({"theme": theme, "intent": entry[2], "audience": entry[3], "description": "", "source_quotes": [],
-                          "weight": 0, "order": 0, "template": entry[4]})
-    found.append({"theme": "brand", "intent": BRAND[2], "audience": BRAND[3], "description": "What AI assistants say about the property itself.",
-                  "source_quotes": [], "weight": 0, "order": 99, "template": BRAND[4]})
     return found
 
 

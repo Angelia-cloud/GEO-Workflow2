@@ -1,23 +1,4 @@
 import { useId, useRef, useState } from "react";
-const fmtInteger = (A) => new Intl.NumberFormat("en-AU").format(Number(A) || 0);
-function fmtHistoryDate(A) {
-  if (!A) {
-    return "\u2014";
-  }
-  const e = new Date(`${A.slice(0, 10)}T12:00:00`);
-  return Number.isNaN(e.getTime())
-    ? A
-    : new Intl.DateTimeFormat("en-AU", {
-        day: "numeric",
-        month: "short",
-        year: "numeric",
-      }).format(e);
-}
-function historyRange(A) {
-  return !A?.dateFrom || !A?.dateTo
-    ? "No dates available"
-    : `${fmtHistoryDate(A.dateFrom)} \u2013 ${fmtHistoryDate(A.dateTo)}`;
-}
 function UploadIcon() {
   return (
     <svg
@@ -37,13 +18,11 @@ function UploadIcon() {
 }
 function RankscaleIntake({
   clientName,
-  historySummary = {},
   onFileChange,
   busy = false,
   uploading = false,
   error = "",
   importNotice = "",
-  hasHistory = false,
   sourceName = "",
 }) {
   const c = useRef(null),
@@ -66,10 +45,7 @@ function RankscaleIntake({
         <div className="rankscale-stage-heading">
           <div>
             <h2 id={`${M}-upload-title`}>Import your Rankscale file</h2>
-            <p>
-              Every record is added to this client’s saved history. Existing records are skipped
-              automatically.
-            </p>
+            <p>Import a Rankscale CSV to create a report for this client.</p>
           </div>
         </div>
         <div
@@ -105,7 +81,7 @@ function RankscaleIntake({
             <h3>{uploading ? "Importing your file\u2026" : "Drop your Rankscale CSV here"}</h3>
             <p>
               {clientName
-                ? "Your full file is imported and saved automatically. No date selection is needed here."
+                ? "Your file is imported automatically. No date selection is needed here."
                 : "Choose a client in the top bar before importing data."}
             </p>
           </div>
@@ -142,36 +118,6 @@ function RankscaleIntake({
           </p>
         )}
       </section>
-      {hasHistory && (
-        <section className="rankscale-stage rankscale-saved-summary" aria-labelledby={`${M}-saved-title`}>
-          <div className="rankscale-stage-heading">
-            <div>
-              <h2 id={`${M}-saved-title`}>Saved history</h2>
-              <p>Open your report to choose From and To dates and explore the selected data.</p>
-            </div>
-          </div>
-          <div className="rankscale-history-summary">
-            <div>
-              <span className="rankscale-kicker">Available dates</span>
-              <strong>{historyRange(historySummary)}</strong>
-            </div>
-            <p>
-              <strong>{fmtInteger(historySummary.rowCount)}</strong>
-              {" records \xB7 "}
-              {fmtInteger(historySummary.answerCount)}
-              {" distinct answers \xB7 "}
-              {fmtInteger(historySummary.promptCount)}
-              {" prompts"}
-            </p>
-          </div>
-        </section>
-      )}
-      <div className="rankscale-intake-footnote">
-        <p>
-          Imported records are saved to the GEO database for this client. Records already saved are skipped, so
-          you can upload overlapping exports.
-        </p>
-      </div>
     </div>
   );
 }

@@ -58,6 +58,9 @@ export function hotelShort(name = "") {
     .trim();
 }
 
+/** The short name set in Report setup, else derived from the property name. */
+export const ownShort = (data) => data?.property?.short_name || selfShort(data?.property?.name || "");
+
 /** The client's own hotel, short: brand and city words removed ("InterContinental Sydney Coogee Beach" → "Coogee Beach"). */
 export function selfShort(name = "") {
   const short = name
@@ -105,13 +108,15 @@ function dayDiff(a, b) {
 const ymd = (iso) => { const { y, m, d } = parseDay(iso); return [y, m - 1, d]; };
 
 /* ---------- comparison set ---------- */
-function rankRows(selfName, selfDetection, competitors) {
-  const rows = [{ name: selfName, short: selfShort(selfName), detection: num(selfDetection), self: true },
+function rankRows(selfName, selfDetection, competitors, selfShortName = selfShort(selfName)) {
+  const rows = [{ name: selfName, short: selfShortName, detection: num(selfDetection), self: true },
     ...competitors.filter((c) => !c.is_self).map((c) => ({
       name: c.display_name || c.name, short: hotelShort(c.display_name || c.name), detection: num(c.detection), self: false,
     }))];
   rows.sort((a, b) => (b.detection ?? -1) - (a.detection ?? -1));
   const self = rows.find((r) => r.self);
+  // with no tracked comparison hotels there is nothing to rank against
+  if (rows.length < 2) return { rows: [], rank: null, tie: false, total: rows.length, self };
   const rank = self?.detection == null ? null : 1 + rows.filter((r) => !r.self && (r.detection ?? -1) > self.detection).length;
   const tie = self?.detection != null && rows.some((r) => !r.self && r.detection === self.detection);
   return { rows, rank, tie, total: rows.length, self };
@@ -122,13 +127,13 @@ function previousRanking(data) {
   if (!prev) return null;
   const entry = (data.competitor_trend || []).find((t) => t.month === prev);
   if (!entry?.hotel) return null;
-  return rankRows(data.property.name, entry.hotel.detection, entry.competitors || []);
+  return rankRows(data.property.name, entry.hotel.detection, entry.competitors || [], ownShort(data));
 }
 
 /* ---------- guest needs (intents) ---------- */
 function intentTable(data) {
   const rows = (data.intent_competitors || []).map((r) => {
-    const cells = [{ name: data.property.name, short: selfShort(data.property.name), v: num(r.hotel.detection), self: true },
+    const cells = [{ name: data.property.name, short: ownShort(data), v: num(r.hotel.detection), self: true },
       ...r.competitors.map((c) => ({ name: c.name, short: hotelShort(c.name), v: num(c.detection), self: false }))];
     const best = Math.max(...cells.map((c) => c.v ?? -1));
     const leaders = cells.filter((c) => c.v === best);
@@ -143,7 +148,7 @@ function intentTable(data) {
 }
 
 function winStatement(data, ranking, table, period) {
-  const short = selfShort(data.property.name);
+  const short = ownShort(data);
   const lead = ranking.rank === 1
     ? (ranking.tie ? `Overall, ${short} is level first among the hotels in the comparison set.` : `Overall, ${short} remains the most frequently mentioned hotel in the comparison set.`)
     : ranking.rank ? `Overall, ${short} ranks ${ordinal(ranking.rank)} in the comparison set, behind ${ranking.rows[0].short}.` : `No comparison is available for ${period.name}.`;
@@ -187,7 +192,7 @@ export function trendModel(data) {
   const all = trend.map((t) => num(t.detection));
   const competitorNames = [...new Set(trend.flatMap((t) => (t.comparison?.competitors || []).filter((c) => !c.is_self).map((c) => c.name)))];
   const comparison = [
-    { name: selfShort(data.property.name), cls: "own", values: trend.map((t) => num(t.comparison?.hotel?.detection)) },
+    { name: ownShort(data), cls: "own", values: trend.map((t) => num(t.comparison?.hotel?.detection)) },
     ...competitorNames.map((name, i) => ({
       name: hotelShort(name), cls: `c${(i % 5) + 2}`,
       values: trend.map((t) => num((t.comparison?.competitors || []).find((c) => c.name === name)?.detection)),
@@ -246,7 +251,7 @@ const priorityChip = (gap, i) => (gap >= 10 || i === 0 ? ["High priority", "chip
 function actions(data, opportunities, period) {
   if (!opportunities) return null;
   const recs = data.findings?.recommendations || [];
-  const short = selfShort(data.property.name);
+  const short = ownShort(data);
   return opportunities
     .filter((o) => o.visibility.status === "gap")
     .sort((a, b) => (b.visibility.gap_points ?? 0) - (a.visibility.gap_points ?? 0))
@@ -294,12 +299,12 @@ function actions(data, opportunities, period) {
 /* ---------- main ---------- */
 export function buildReportModel(data, opportunities) {
   const period = periodInfo(data);
-  const short = selfShort(data.property.name);
+  const short = ownShort(data);
   const engines = data.engines || [];
   const det = num(data.overall?.detection);
   const cmp = data.comparison || {};
   const change = cmp.available ? num(cmp.metrics?.detection?.change) : null;
-  const ranking = data.hotel_neutral ? rankRows(data.property.name, data.hotel_neutral.detection, data.competitors || []) : { rows: [], rank: null };
+  const ranking = data.hotel_neutral ? rankRows(data.property.name, data.hotel_neutral.detection, data.competitors || [], ownShort(data)) : { rows: [], rank: null };
   const prevRanking = previousRanking(data);
   const table = intentTable(data);
   const opp = pickOpportunity(opportunities, table);
@@ -334,7 +339,8 @@ export function buildReportModel(data, opportunities) {
   const second = ranking.rows?.find((r) => !r.self);
   const gapToNext = ranking.rank === 1 && second ? (ranking.self.detection - second.detection) : null;
   const posText = !ranking.rank ? `No comparison-hotel data is available for ${period.name}.`
-    : ranking.rank === 1 ? `${short} ${gapToNext != null && gapToNext >= 5 ? "remained clearly ahead of" : "stayed narrowly ahead of"} the comparison hotels in ${inName} (${pct1(ranking.self.detection)} vs ${second.short} ${pct1(second.detection)}).`
+    : ranking.rank === 1 && second ? `${short} ${gapToNext != null && gapToNext >= 5 ? "remained clearly ahead of" : "stayed narrowly ahead of"} the comparison hotels in ${inName} (${pct1(ranking.self.detection)} vs ${second.short} ${pct1(second.detection)}).`
+    : ranking.rank === 1 ? `${short} led the comparison hotels in ${inName} (${pct1(ranking.self.detection)}).`
       : `${short} was behind ${ranking.rows[0].short} in ${inName} (${pct1(ranking.self.detection)} vs ${pct1(ranking.rows[0].detection)}) on the ${neutralQ} comparison questions.`;
 
   /* progress timeline */
